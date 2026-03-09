@@ -1,115 +1,248 @@
 """
-build_windows.py — Script de empacotamento para Windows
-Gera .exe + instalador NSIS
+build_windows.py — All-in-one build script for América
+Downloads FFmpeg (if needed), bundles with PyInstaller, compiles Inno Setup installer.
 
-Pré-requisitos:
+Prerequisites:
   pip install pyinstaller
-  Instalar NSIS: https://nsis.sourceforge.io/
+  winget install JRSoftware.InnoSetup   (or install manually)
 
-Uso:
+Usage:
   python build_windows.py
 """
 
 import subprocess
 import sys
 import os
+import shutil
+import zipfile
+import urllib.request
 from pathlib import Path
 
 BASE = Path(__file__).parent
 DIST = BASE / "dist"
 BUILD = BASE / "build"
+FFMPEG_DIR = BASE / "ffmpeg"
+INSTALLER_OUTPUT = BASE / "installer_output"
 
+APP_NAME = "America"
+APP_VERSION = "1.1.0"
+FFMPEG_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+
+
+# ───────────────────────────────────────
+#  1. Check / install PyInstaller
+# ───────────────────────────────────────
 def check_pyinstaller():
     try:
         import PyInstaller
         print(f"✓ PyInstaller {PyInstaller.__version__}")
     except ImportError:
-        print("Instalando PyInstaller...")
+        print("Installing PyInstaller...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
+
+# ───────────────────────────────────────
+#  2. Download FFmpeg if not present
+# ───────────────────────────────────────
+def ensure_ffmpeg():
+    ffmpeg_exe = FFMPEG_DIR / "ffmpeg.exe"
+    ffprobe_exe = FFMPEG_DIR / "ffprobe.exe"
+
+    if ffmpeg_exe.exists() and ffprobe_exe.exists():
+        print(f"✓ FFmpeg already present in {FFMPEG_DIR}")
+        return
+
+    FFMPEG_DIR.mkdir(exist_ok=True)
+
+    # Try copying from system PATH first
+    system_ffmpeg = shutil.which("ffmpeg")
+    system_ffprobe = shutil.which("ffprobe")
+    if system_ffmpeg and system_ffprobe:
+        print(f"  Copying ffmpeg from system: {system_ffmpeg}")
+        shutil.copy2(system_ffmpeg, ffmpeg_exe)
+        print(f"  Copying ffprobe from system: {system_ffprobe}")
+        shutil.copy2(system_ffprobe, ffprobe_exe)
+        print("✓ FFmpeg copied from system PATH")
+        return
+
+    # Download from gyan.dev
+    zip_path = BASE / "ffmpeg-release-essentials.zip"
+    print(f"⬇ Downloading FFmpeg from {FFMPEG_ZIP_URL}...")
+    print("  (this may take a few minutes, ~90 MB)")
+
+    urllib.request.urlretrieve(FFMPEG_ZIP_URL, str(zip_path))
+    print("  Download complete. Extracting...")
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        # Find ffmpeg.exe and ffprobe.exe inside the zip
+        for member in zf.namelist():
+            basename = Path(member).name.lower()
+            if basename == "ffmpeg.exe":
+                with zf.open(member) as src, open(ffmpeg_exe, "wb") as dst:
+                    dst.write(src.read())
+                print(f"  Extracted ffmpeg.exe")
+            elif basename == "ffprobe.exe":
+                with zf.open(member) as src, open(ffprobe_exe, "wb") as dst:
+                    dst.write(src.read())
+                print(f"  Extracted ffprobe.exe")
+
+    zip_path.unlink()  # Clean up zip
+    print("✓ FFmpeg downloaded and extracted")
+
+
+# ───────────────────────────────────────
+#  3. Build .exe with PyInstaller (onedir)
+# ───────────────────────────────────────
 def build_exe():
-    print("\n🔨 Empacotando América.exe...")
+    print("\n🔨 Building América with PyInstaller (onedir)...")
+
+    # Clean previous build
+    dist_app = DIST / APP_NAME
+    if dist_app.exists():
+        shutil.rmtree(dist_app)
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile",
+        "--onedir",
         "--windowed",
-        "--name", "America",
-        "--icon", "assets/icon.ico" if (BASE / "assets/icon.ico").exists() else "NONE",
-        "--add-data", f"{BASE}/assets;assets" if sys.platform == "win32" else f"{BASE}/assets:assets",
+        "--name", APP_NAME,
         "--clean",
         "--noconfirm",
         "--distpath", str(DIST),
         "--workpath", str(BUILD),
+        # Bundle FFmpeg alongside the app
+        "--add-data", f"{FFMPEG_DIR};ffmpeg",
+        # Bundle assets (icon, etc.)
+        "--add-data", f"{BASE / 'assets'};assets",
         str(BASE / "america.py"),
     ]
+
+    # Add icon if it exists
+    icon_path = BASE / "assets" / "icon.ico"
+    if icon_path.exists():
+        cmd.insert(-1, "--icon")
+        cmd.insert(-1, str(icon_path))
+
     subprocess.check_call(cmd, cwd=str(BASE))
-    print(f"\n✅ Executável gerado em: {DIST / 'America.exe'}")
+    print(f"\n✅ App built at: {dist_app}")
 
-def generate_nsis_script():
-    """Gera script NSIS para o instalador."""
-    exe_path = DIST / "America.exe"
-    nsis = f"""
-; América Installer — NSIS Script
-; Compile com: makensis installer.nsi
+    # Verify FFmpeg is bundled
+    bundled_ffmpeg = dist_app / "ffmpeg" / "ffmpeg.exe"
+    if bundled_ffmpeg.exists():
+        print(f"✓ FFmpeg bundled: {bundled_ffmpeg}")
+    else:
+        print("⚠ WARNING: FFmpeg not found in bundle!")
 
-!define APP_NAME "América"
-!define APP_VERSION "1.0.0"
-!define APP_EXE "America.exe"
-!define APP_ICON "assets\\icon.ico"
 
-Name "${{APP_NAME}} ${{APP_VERSION}}"
-OutFile "America_Setup.exe"
-InstallDir "$PROGRAMFILES\\America"
-InstallDirRegKey HKCU "Software\\America" ""
-RequestExecutionLevel admin
+# ───────────────────────────────────────
+#  4. Generate Inno Setup script
+# ───────────────────────────────────────
+def generate_inno_script():
+    dist_app = DIST / APP_NAME
+    icon_path = BASE / "assets" / "icon.ico"
 
-; Páginas
-Page welcome
-Page directory
-Page instfiles
-UninstPage uninstConfirm
-UninstPage instfiles
+    # Build Setup section
+    setup_lines = [
+        "; America — Inno Setup Installer Script",
+        "; Auto-generated by build_windows.py",
+        "",
+        "[Setup]",
+        "AppName=America",
+        f"AppVersion={APP_VERSION}",
+        "AppPublisher=America",
+        "DefaultDirName={localappdata}\\America",
+        "DefaultGroupName=America",
+        f"OutputDir={INSTALLER_OUTPUT}",
+        "OutputBaseFilename=America_Setup",
+        "Compression=lzma2",
+        "SolidCompression=yes",
+        "PrivilegesRequired=lowest",
+    ]
+    if icon_path.exists():
+        setup_lines.append(f"SetupIconFile={icon_path}")
 
-Section "Principal" SecMain
-  SetOutPath "$INSTDIR"
-  File "{exe_path}"
-  
-  ; Atalhos
-  CreateDirectory "$SMPROGRAMS\\América"
-  CreateShortcut "$SMPROGRAMS\\América\\América.lnk" "$INSTDIR\\${{APP_EXE}}"
-  CreateShortcut "$DESKTOP\\América.lnk" "$INSTDIR\\${{APP_EXE}}"
-  
-  ; Registro para desinstalação
-  WriteRegStr HKCU "Software\\America" "" "$INSTDIR"
-  WriteUninstaller "$INSTDIR\\Uninstall.exe"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\America" \\
-                   "DisplayName" "${{APP_NAME}}"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\America" \\
-                   "UninstallString" "$INSTDIR\\Uninstall.exe"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\America" \\
-                   "DisplayVersion" "${{APP_VERSION}}"
-SectionEnd
+    rest = f"""
+[Languages]
+Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\\BrazilianPortuguese.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
-Section "Uninstall"
-  Delete "$INSTDIR\\${{APP_EXE}}"
-  Delete "$INSTDIR\\Uninstall.exe"
-  RMDir "$INSTDIR"
-  Delete "$SMPROGRAMS\\América\\América.lnk"
-  RMDir "$SMPROGRAMS\\América"
-  Delete "$DESKTOP\\América.lnk"
-  DeleteRegKey HKCU "Software\\America"
-  DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\America"
-SectionEnd
+[Tasks]
+Name: "desktopicon"; Description: "Criar atalho na area de trabalho"
+
+[Files]
+Source: "{dist_app}\\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{{group}}\\America"; Filename: "{{app}}\\{APP_NAME}.exe"
+Name: "{{group}}\\Desinstalar America"; Filename: "{{uninstallexe}}"
+Name: "{{commondesktop}}\\America"; Filename: "{{app}}\\{APP_NAME}.exe"; Tasks: desktopicon
+
+[Run]
+Filename: "{{app}}\\{APP_NAME}.exe"; Description: "Iniciar America"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{{app}}"
 """
-    nsis_file = BASE / "installer.nsi"
-    nsis_file.write_text(nsis, encoding="utf-8")
-    print(f"✓ Script NSIS gerado: {nsis_file}")
-    print("  → Para gerar o instalador: makensis installer.nsi")
+    iss_content = "\n".join(setup_lines) + rest
+    iss_path = BASE / "installer.iss"
+    iss_path.write_text(iss_content, encoding="utf-8")
+    print(f"✓ Inno Setup script: {iss_path}")
+    return iss_path
 
+
+# ───────────────────────────────────────
+#  5. Compile Inno Setup installer
+# ───────────────────────────────────────
+def compile_installer(iss_path: Path):
+    INSTALLER_OUTPUT.mkdir(exist_ok=True)
+
+    # Find iscc.exe (Inno Setup Compiler)
+    iscc_paths = [
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Inno Setup 6" / "ISCC.exe",
+        Path(os.environ.get("ProgramFiles", "")) / "Inno Setup 6" / "ISCC.exe",
+        Path.home() / "AppData" / "Local" / "Programs" / "Inno Setup 6" / "ISCC.exe",
+    ]
+    # Also check PATH
+    iscc_in_path = shutil.which("iscc") or shutil.which("ISCC")
+    if iscc_in_path:
+        iscc_paths.insert(0, Path(iscc_in_path))
+
+    iscc = None
+    for p in iscc_paths:
+        if p.exists():
+            iscc = p
+            break
+
+    if not iscc:
+        print("\n⚠ Inno Setup (ISCC.exe) not found!")
+        print("  Install it with: winget install JRSoftware.InnoSetup")
+        print(f"  Then compile manually: ISCC.exe \"{iss_path}\"")
+        return False
+
+    print(f"\n📦 Compiling installer with: {iscc}")
+    subprocess.check_call([str(iscc), str(iss_path)])
+    setup_exe = INSTALLER_OUTPUT / "America_Setup.exe"
+    if setup_exe.exists():
+        size_mb = setup_exe.stat().st_size / (1024 * 1024)
+        print(f"\n✅ Installer created: {setup_exe}")
+        print(f"   Size: {size_mb:.1f} MB")
+    return True
+
+
+# ───────────────────────────────────────
+#  MAIN
+# ───────────────────────────────────────
 if __name__ == "__main__":
+    print("=" * 50)
+    print(f"  América {APP_VERSION} — Build Script")
+    print("=" * 50)
+
     check_pyinstaller()
+    ensure_ffmpeg()
     build_exe()
-    generate_nsis_script()
-    print("\n🎉 Build concluído!")
-    print("   Executável: dist/America.exe")
-    print("   Instalador: execute 'makensis installer.nsi' (requer NSIS)")
+    iss_path = generate_inno_script()
+    compile_installer(iss_path)
+
+    print("\n🎉 Build complete!")
+    print(f"   App folder:  {DIST / APP_NAME}")
+    print(f"   Installer:   {INSTALLER_OUTPUT / 'America_Setup.exe'}")

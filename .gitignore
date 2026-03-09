@@ -28,6 +28,7 @@ desktop.ini
 
 # Build artifacts
 installer_output/
+ffmpeg/
 *.exe
 
 # Logs

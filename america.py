@@ -12,7 +12,9 @@ import os
 import sys
 import re
 import time
+import random
 import logging
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -23,7 +25,7 @@ from enum import Enum
 #  CONSTANTS & CONFIG
 # ──────────────────────────────────────────────
 APP_NAME    = "América"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_DATA    = Path.home() / "AppData" / "Local" / "America" if sys.platform == "win32" else Path.home() / ".america"
 APP_DATA.mkdir(parents=True, exist_ok=True)
 SETTINGS_FILE = APP_DATA / "settings.json"
@@ -32,6 +34,21 @@ LOG_FILE      = APP_DATA / "america.log"
 
 # Sora font (fallback cascade for cross-platform)
 FONT_SORA = ("Sora", 10)
+
+# Track whether we already attempted an auto-update this session to avoid loops
+_ytdlp_auto_updated: bool = False
+
+def _get_ffmpeg_path() -> Optional[str]:
+    """Return path to bundled FFmpeg dir, or None if not found."""
+    if getattr(sys, 'frozen', False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).parent
+    # Check direct ffmpeg/ subfolder first, then _internal/ffmpeg/ (PyInstaller onedir)
+    for candidate in [base / "ffmpeg", base / "_internal" / "ffmpeg"]:
+        if (candidate / "ffmpeg.exe").exists():
+            return str(candidate)
+    return None
 
 # ──────────────────────────────────────────────
 #  LOGGING
@@ -151,6 +168,7 @@ class Settings:
     language:      str = "pt-BR"
     playlist_subfolder: bool = True
     max_retries:   int = 3
+    cookie_browser: str = "none"  # chrome, firefox, edge, brave, opera, none
 
 # ──────────────────────────────────────────────
 #  SETTINGS & HISTORY STORES
@@ -266,6 +284,8 @@ class DownloadManager:
         self._paused:  bool = False
         self._cancelled_ids: set = set()
         self._id_counter = 0
+        self._consecutive_blocks: int = 0
+        self._cooldown_secs: int = 0
 
     def _new_id(self) -> str:
         self._id_counter += 1
@@ -325,6 +345,7 @@ class DownloadManager:
             self._worker.start()  # type: ignore[union-attr]
 
     def _process(self):
+        is_first = True
         while True:
             if self._paused:
                 time.sleep(0.5)
@@ -337,11 +358,30 @@ class DownloadManager:
                 item.state = DownloadState.CANCELLED
                 self.on_update()
                 continue
+
+            # Rate limiting: delay between downloads to avoid YouTube bot detection
+            if not is_first:
+                delay = random.uniform(2.0, 5.0)
+                log.info(f"Waiting {delay:.1f}s before next download...")
+                time.sleep(delay)
+            is_first = False
+
+            # Cooldown: if consecutive bot blocks detected, back off
+            if self._cooldown_secs > 0:
+                log.warning(f"Cooldown: waiting {self._cooldown_secs}s after bot detection...")
+                time.sleep(self._cooldown_secs)
+                self._cooldown_secs = 0
+
             self._download(item)
         self.on_update()
 
     def _download(self, item: DownloadItem):
-        """Real download using yt-dlp (imported at runtime)."""
+        """Real download using yt-dlp (imported at runtime).
+
+        Strategy: try WITHOUT cookies first (most downloads work fine).
+        If YouTube blocks with bot/sign-in detection, retry WITH cookies.
+        If cookie decryption fails (DPAPI on Chrome), report a clear message.
+        """
         try:
             import yt_dlp  # type: ignore
         except ImportError:
@@ -359,7 +399,7 @@ class DownloadManager:
         quality = self.settings.data.quality
         audio_q = "0" if quality == "high" else "5"   # 0=best, 5=~128k
 
-        def progress_hook(d):
+        def progress_hook(d: dict[str, Any]) -> None:
             if item.id in self._cancelled_ids:
                 raise Exception("Cancelado pelo usuário")
             if d["status"] == "downloading":
@@ -382,13 +422,16 @@ class DownloadManager:
         else:
             outtmpl = str(Path(out_dir) / f"{pattern}.%(ext)s").replace("{title}", "%(title)s").replace("{channel}", "%(uploader)s")
 
-        ydl_opts = {
+        base_opts: dict[str, Any] = {
             "format":          "bestaudio/best",
             "outtmpl":         outtmpl,
             "progress_hooks":  [progress_hook],
             "quiet":           True,
             "no_warnings":     True,
             "noplaylist":      not item.is_playlist,
+            "sleep_interval":  1,          # seconds between yt-dlp requests
+            "max_sleep_interval": 5,       # random up to this value
+            "sleep_interval_requests": 1,  # between API requests
             "postprocessors": [{
                 "key":            "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
@@ -396,21 +439,92 @@ class DownloadManager:
             }],
         }
 
+        # Use bundled FFmpeg if available
+        ffmpeg_path = _get_ffmpeg_path()
+        if ffmpeg_path:
+            base_opts["ffmpeg_location"] = ffmpeg_path
+            log.info(f"Using bundled FFmpeg: {ffmpeg_path}")
+
+        cookie_browser = self.settings.data.cookie_browser
         retries = self.settings.data.max_retries
+
+        # ── Phase 1: try WITHOUT cookies ──
+        result = self._try_download(yt_dlp, item, base_opts, retries, out_dir)
+        if result == "done":
+            self._consecutive_blocks = 0  # reset on success
+            return
+        if result == "cancelled":
+            return
+
+        # ── Phase 1.5: if nsig, attempt auto-update yt-dlp and retry ──
+        if _is_nsig_error(result):
+            item.error_msg = "Atualizando yt-dlp…"
+            self.on_update()
+            if _auto_update_ytdlp():
+                import yt_dlp  # noqa: F811 — reloads new version (sys.modules was cleared)
+                result = self._try_download(yt_dlp, item, base_opts, retries, out_dir)
+                if result == "done":
+                    self._consecutive_blocks = 0
+                    return
+                if result == "cancelled":
+                    return
+
+        # ── Phase 2: if bot-detected, retry WITH cookies ──
+        if _is_bot_block(result) and cookie_browser and cookie_browser != "none":
+            log.info(f"Bot detected for {item.url}, retrying with {cookie_browser} cookies...")
+            item.state = DownloadState.DETECTING
+            item.progress = 0.0
+            self.on_update()
+
+            cookie_opts = {**base_opts, "cookiesfrombrowser": (cookie_browser,)}
+            result = self._try_download(yt_dlp, item, cookie_opts, retries, out_dir)
+            if result == "done":
+                self._consecutive_blocks = 0
+                return
+            if result == "cancelled":
+                return
+
+        # ── Track consecutive blocks for queue-level backoff ──
+        if _is_bot_block(result):
+            self._consecutive_blocks += 1
+            if self._consecutive_blocks >= 2:
+                # Exponential cooldown: 60s, 120s, 240s, ... up to 10min
+                self._cooldown_secs = min(60 * (2 ** (self._consecutive_blocks - 2)), 600)
+                log.warning(f"Consecutive bot blocks: {self._consecutive_blocks}. "
+                            f"Next download will wait {self._cooldown_secs}s.")
+        elif _is_rate_limited(result):
+            self._consecutive_blocks += 1
+            # 429: cooldown starts on the first block (unlike bot blocks which wait for 2+)
+            self._cooldown_secs = min(60 * (2 ** (self._consecutive_blocks - 1)), 600)
+            log.warning(f"Rate limit (429): {self._consecutive_blocks}x consecutive. "
+                        f"Next download will wait {self._cooldown_secs}s.")
+        else:
+            self._consecutive_blocks = 0
+
+        # ── All attempts exhausted ──
+        item.state = DownloadState.FAILED
+        item.error_msg = _friendly_error(result)
+        log.error(f"Failed: {item.url} — {result}")
+        self.on_update()
+
+    def _try_download(self, yt_dlp: Any, item: DownloadItem,
+                      opts: dict[str, Any], retries: int,
+                      out_dir: str) -> str:
+        """Attempt download with given opts. Returns 'done', 'cancelled', or error message."""
+        last_error = ""
         for attempt in range(1, retries + 1):
             if item.id in self._cancelled_ids:
                 item.state = DownloadState.CANCELLED
                 self.on_update()
-                return
+                return "cancelled"
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(item.url, download=True)
                     if info:
                         item.title   = info.get("title", item.url)
                         item.channel = info.get("uploader", "")
                         secs         = info.get("duration", 0) or 0
                         item.duration = f"{secs//60}:{secs%60:02d}" if secs else ""
-                        # Set dest_path to the actual playlist subfolder if applicable
                         if item.is_playlist and self.settings.data.playlist_subfolder:
                             playlist_name = info.get("title", "Playlist")
                             item.dest_path = str(Path(out_dir) / playlist_name)
@@ -422,26 +536,90 @@ class DownloadManager:
                 self.history.add(item)
                 log.info(f"Done: {item.title}")
                 self.on_update()
-                return
+                return "done"
             except Exception as e:
-                msg = str(e)
-                if "Cancelado" in msg:
+                last_error = str(e)
+                if "Cancelado" in last_error:
                     item.state     = DownloadState.CANCELLED
                     item.error_msg = "Você cancelou o download"
                     log.info(f"Cancelled: {item.url}")
                     self.on_update()
-                    return
+                    return "cancelled"
                 log.warning(f"Attempt {attempt}/{retries} failed for {item.url}: {e}")
+                # Don't retry DPAPI errors — they'll fail every time
+                if "dpapi" in last_error.lower():
+                    return last_error
+                # Don't retry 429 — rate limit persists through quick retries
+                if _is_rate_limited(last_error):
+                    return last_error
+                # Don't retry nsig — all retries will fail until yt-dlp is updated
+                if _is_nsig_error(last_error):
+                    return last_error
                 if attempt < retries:
                     time.sleep(2 ** attempt)
-                else:
-                    item.state     = DownloadState.FAILED
-                    item.error_msg = _friendly_error(msg)
-                    log.error(f"Failed: {item.url} — {msg}")
-                    self.on_update()
+        return last_error
+
+
+def _is_bot_block(msg: str) -> bool:
+    """Check if the error message indicates YouTube bot/sign-in detection."""
+    m = msg.lower()
+    return "sign in" in m or "bot" in m or "confirm your age" in m
+
+
+def _is_rate_limited(msg: str) -> bool:
+    """Check if the error indicates YouTube rate limiting (HTTP 429)."""
+    m = msg.lower()
+    return "429" in m or "too many requests" in m
+
+
+def _is_nsig_error(msg: str) -> bool:
+    """Check if the error indicates an outdated yt-dlp (nsig decryption failure)."""
+    return "nsig" in msg.lower()
+
+
+def _auto_update_ytdlp() -> bool:
+    """Run `pip install -U yt-dlp`, purge module cache, return True on success.
+
+    Only attempted once per session (guarded by _ytdlp_auto_updated).
+    Skipped silently for frozen/PyInstaller builds where pip cannot update
+    the bundled package.
+    """
+    global _ytdlp_auto_updated
+    if _ytdlp_auto_updated:
+        return False  # already tried this session — avoid infinite loop
+    _ytdlp_auto_updated = True  # mark before attempt so any failure also counts
+
+    if getattr(sys, "frozen", False):
+        log.warning("Auto-update skipped: running as frozen executable.")
+        return False
+
+    try:
+        log.info("Attempting yt-dlp auto-update…")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            # Purge cached modules so the next `import yt_dlp` loads the new version
+            to_remove = [k for k in sys.modules if k == "yt_dlp" or k.startswith("yt_dlp.")]
+            for k in to_remove:
+                del sys.modules[k]
+            log.info("yt-dlp auto-updated successfully.")
+            return True
+        log.warning(f"yt-dlp auto-update failed (exit {result.returncode}): {result.stderr.strip()}")
+        return False
+    except Exception as exc:
+        log.warning(f"yt-dlp auto-update exception: {exc}")
+        return False
+
 
 def _friendly_error(msg: str) -> str:
     msg_l = msg.lower()
+    if "dpapi" in msg_l or "failed to decrypt" in msg_l:
+        return ("Não foi possível ler os cookies do Chrome (DPAPI). "
+                "Troque para Firefox nos Ajustes ou defina cookies como 'Nenhum'")
+    if "sign in" in msg_l or "bot" in msg_l:
+        return "YouTube bloqueou o acesso. Configure o navegador de cookies nos Ajustes"
     if "private" in msg_l or "unavailable" in msg_l:
         return "Conteúdo indisponível ou privado"
     if "network" in msg_l or "connection" in msg_l or "timed out" in msg_l:
@@ -450,6 +628,17 @@ def _friendly_error(msg: str) -> str:
         return "FFmpeg não encontrado. Instale o FFmpeg e reinicie o app"
     if "permission" in msg_l or "access denied" in msg_l:
         return "Sem permissão de escrita. Troque a pasta de destino"
+    if "429" in msg_l or "too many requests" in msg_l:
+        return ("YouTube limitou as requisições. O app aguardará antes de continuar. "
+                "Tente reduzir o número de downloads simultâneos.")
+    if "nsig" in msg_l:
+        if getattr(sys, "frozen", False):
+            return "yt-dlp desatualizado. Baixe a nova versão do app."
+        return "yt-dlp desatualizado. A atualização automática falhou. Execute: pip install -U yt-dlp"
+    if "precondition" in msg_l:
+        return "YouTube bloqueou temporariamente. O app aguardará antes de tentar novamente."
+    if "confirm your age" in msg_l:
+        return "Conteúdo restrito por idade. Configure um navegador nos Ajustes."
     return "Erro inesperado. Tente novamente"
 
 # ──────────────────────────────────────────────
@@ -621,16 +810,45 @@ class AmericaApp(tk.Tk):
         self._set_quality: tk.StringVar = tk.StringVar()
         self._playlist_sub_var: tk.BooleanVar = tk.BooleanVar()
         self._set_theme: tk.StringVar = tk.StringVar()
+        self._cookie_browser_var: tk.StringVar = tk.StringVar()
 
         self.title(APP_NAME)
         self.geometry("900x660")
         self.minsize(760, 560)
+        self._set_icon()
         self._apply_theme()
         self._build_ui()
         self.toast = ToastManager(self)
         self._current_tab = "home"
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         log.info(f"América {APP_VERSION} iniciado")
+
+    # ── Icon ───────────────────────────────────
+    def _set_icon(self):
+        """Set window icon (title bar + taskbar)."""
+        if getattr(sys, 'frozen', False):
+            base = Path(sys.executable).parent
+        else:
+            base = Path(__file__).parent
+        # Try .ico first (Windows native), then .png
+        ico_path = base / "assets" / "icon.ico"
+        png_path = base / "assets" / "icon.png"
+        # Also check _internal/ for PyInstaller onedir
+        if not ico_path.exists():
+            ico_path = base / "_internal" / "assets" / "icon.ico"
+        if not png_path.exists():
+            png_path = base / "_internal" / "assets" / "icon.png"
+        try:
+            if ico_path.exists():
+                self.iconbitmap(str(ico_path))
+                log.info(f"Icon loaded: {ico_path}")
+            elif png_path.exists():
+                icon_img = tk.PhotoImage(file=str(png_path))
+                self.iconphoto(True, icon_img)
+                self._icon_ref = icon_img  # prevent garbage collection
+                log.info(f"Icon loaded: {png_path}")
+        except Exception as e:
+            log.warning(f"Could not set icon: {e}")
 
     # ── Theme ──────────────────────────────────
     def _apply_theme(self):
@@ -1160,6 +1378,31 @@ class AmericaApp(tk.Tk):
             cb.pack(side="left")
         field_row(content, "Playlists", playlist_row)
 
+        # ── Cookie browser ──
+        section("Autenticação")
+        _browser_labels = {
+            "chrome": "Google Chrome",
+            "firefox": "Mozilla Firefox",
+            "edge": "Microsoft Edge",
+            "brave": "Brave",
+            "opera": "Opera",
+            "none": "Nenhum (desativado)",
+        }
+        _browser_keys = list(_browser_labels.keys())
+        _browser_names = list(_browser_labels.values())
+        current_browser = s.cookie_browser if hasattr(s, "cookie_browser") else "chrome"
+        self._cookie_browser_var = tk.StringVar(
+            value=_browser_labels.get(current_browser, _browser_labels["chrome"])
+        )
+        def cookie_row(parent):
+            cb = ttk.Combobox(parent, textvariable=self._cookie_browser_var,
+                              values=_browser_names, font=("Sora", 9),
+                              state="readonly", width=30)
+            cb.pack(side="left", ipady=4)
+            tk.Label(parent, text="Resolve o erro 'confirme que não é robô'",
+                     bg=t["bg"], fg=t["text3"], font=("Sora", 8)).pack(side="left", padx=(10, 0))
+        field_row(content, "Navegador de cookies", cookie_row)
+
         section("Interface")
         # ── Theme ──
         self._set_theme = tk.StringVar(value=self._theme_name)
@@ -1198,6 +1441,16 @@ class AmericaApp(tk.Tk):
         s.naming_pattern    = self._naming_var.get()
         s.quality           = self._set_quality.get()
         s.playlist_subfolder = self._playlist_sub_var.get()
+        # Map display name back to key for cookie_browser
+        _browser_reverse = {
+            "Google Chrome": "chrome",
+            "Mozilla Firefox": "firefox",
+            "Microsoft Edge": "edge",
+            "Brave": "brave",
+            "Opera": "opera",
+            "Nenhum (desativado)": "none",
+        }
+        s.cookie_browser = _browser_reverse.get(self._cookie_browser_var.get(), "chrome")
         old_theme = self._theme_name
         new_theme = self._set_theme.get()
         s.theme = new_theme
