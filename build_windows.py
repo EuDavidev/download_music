@@ -126,9 +126,15 @@ def build_exe():
     subprocess.check_call(cmd, cwd=str(BASE))
     print(f"\n✅ App built at: {dist_app}")
 
-    # Verify FFmpeg is bundled
-    bundled_ffmpeg = dist_app / "ffmpeg" / "ffmpeg.exe"
-    if bundled_ffmpeg.exists():
+    # Verify FFmpeg is bundled (PyInstaller ≥6 places --add-data under _internal/)
+    bundled_ffmpeg = next(
+        (p for p in [
+            dist_app / "_internal" / "ffmpeg" / "ffmpeg.exe",
+            dist_app / "ffmpeg" / "ffmpeg.exe",
+        ] if p.exists()),
+        None,
+    )
+    if bundled_ffmpeg:
         print(f"✓ FFmpeg bundled: {bundled_ffmpeg}")
     else:
         print("⚠ WARNING: FFmpeg not found in bundle!")
