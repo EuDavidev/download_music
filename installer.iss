@@ -3,7 +3,7 @@
 
 [Setup]
 AppName=America
-AppVersion=1.1.0
+AppVersion=1.1.1
 AppPublisher=America
 DefaultDirName={localappdata}\America
 DefaultGroupName=America

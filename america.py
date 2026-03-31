@@ -30,7 +30,7 @@ import webbrowser
 #  CONSTANTS & CONFIG
 # ──────────────────────────────────────────────
 APP_NAME    = "América"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "eudavidev/download_music"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 APP_DATA    = Path.home() / "AppData" / "Local" / "America" if sys.platform == "win32" else Path.home() / ".america"
