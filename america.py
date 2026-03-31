@@ -14,6 +14,7 @@ import re
 import time
 import random
 import logging
+import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,9 @@ HISTORY_FILE  = APP_DATA / "history.json"
 LOG_FILE      = APP_DATA / "america.log"
 LOG_SERVER_PORT = 5000  # Local port for log server
 UPDATE_CHECK_INTERVAL = 3600  # Check for updates every 1 hour
+_log_server_instance: Optional[HTTPServer] = None
+_log_server_thread: Optional[threading.Thread] = None
+_log_server_lock = threading.Lock()
 
 # Sora font (fallback cascade for cross-platform)
 FONT_SORA = ("Sora", 10)
@@ -97,8 +101,13 @@ def _check_app_update() -> Optional[dict[str, Any]]:
         )
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
+        if not isinstance(data, dict):
+            return None
         
-        github_version = data.get("tag_name", "").lstrip("v")
+        tag_name = data.get("tag_name", "")
+        if not isinstance(tag_name, str):
+            return None
+        github_version = tag_name.lstrip("v")
         if not github_version:
             return None
         
@@ -106,15 +115,23 @@ def _check_app_update() -> Optional[dict[str, Any]]:
         if _compare_versions(github_version, APP_VERSION) > 0:
             # Find Windows installer download
             downloads = data.get("assets", [])
+            if not isinstance(downloads, list):
+                return None
             installer = next(
-                (d for d in downloads if d["name"].endswith(".exe")),
+                (
+                    d for d in downloads
+                    if isinstance(d, dict)
+                    and isinstance(d.get("name"), str)
+                    and d["name"].endswith(".exe")
+                    and isinstance(d.get("browser_download_url"), str)
+                ),
                 None
             )
             if installer:
                 return {
                     "version": github_version,
                     "download_url": installer["browser_download_url"],
-                    "body": data.get("body", ""),
+                    "body": str(data.get("body", "")),
                     "name": installer["name"]
                 }
     except Exception as e:
@@ -305,15 +322,21 @@ def _start_log_server() -> Optional[threading.Thread]:
     
     Returns thread object or None if failed to start.
     """
-    try:
-        server = HTTPServer(("127.0.0.1", LOG_SERVER_PORT), LogViewerHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        log.info(f"Log server started on http://127.0.0.1:{LOG_SERVER_PORT}")
-        return thread
-    except Exception as e:
-        log.error(f"Could not start log server: {e}")
-        return None
+    global _log_server_instance, _log_server_thread
+    with _log_server_lock:
+        if _log_server_thread and _log_server_thread.is_alive():
+            return _log_server_thread
+        try:
+            _log_server_instance = HTTPServer(("127.0.0.1", LOG_SERVER_PORT), LogViewerHandler)
+            _log_server_thread = threading.Thread(target=_log_server_instance.serve_forever, daemon=True)
+            _log_server_thread.start()
+            log.info(f"Log server started on http://127.0.0.1:{LOG_SERVER_PORT}")
+            return _log_server_thread
+        except Exception as e:
+            _log_server_instance = None
+            _log_server_thread = None
+            log.error(f"Could not start log server: {e}")
+            return None
 
 # ──────────────────────────────────────────────
 #  LOGGING
@@ -435,7 +458,6 @@ class DownloadItem:
     quality:   str = "high"   # "normal" | "high"
 
 @dataclass
-@dataclass
 class Settings:
     output_dir:    str = str(Path.home() / "Downloads" / "América")
     naming_pattern: str = "{title}"  # {title}, {title} - {channel}
@@ -456,13 +478,33 @@ class SettingsStore:
         self._s = Settings()
         self.load()
 
+    @staticmethod
+    def _coerce_value(key: str, value: Any, current: Settings) -> Any:
+        if key == "output_dir":
+            return str(value) if isinstance(value, (str, Path)) else current.output_dir
+        if key in ("naming_pattern", "quality", "theme", "language", "cookie_browser"):
+            return str(value) if isinstance(value, str) else getattr(current, key)
+        if key == "max_retries":
+            try:
+                retries = int(value)
+                return max(1, min(retries, 10))
+            except Exception:
+                return current.max_retries
+        if key in ("playlist_subfolder", "auto_update", "enable_log_server"):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on", "sim")
+            return getattr(current, key)
+        return value
+
     def load(self):
         if SETTINGS_FILE.exists():
             try:
                 d = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
                 for k, v in d.items():
                     if hasattr(self._s, k):
-                        setattr(self._s, k, v)
+                        setattr(self._s, k, self._coerce_value(k, v, self._s))
             except Exception as e:
                 log.warning(f"settings load error: {e}")
 
@@ -488,7 +530,8 @@ class HistoryStore:
     def load(self):
         if HISTORY_FILE.exists():
             try:
-                self._items = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+                loaded = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+                self._items = loaded if isinstance(loaded, list) else []
             except Exception as e:
                 log.warning(f"history load error: {e}")
 
@@ -585,6 +628,13 @@ class DownloadManager:
         self._consecutive_blocks: int = 0
         self._cooldown_secs: int = 0
         self._ydl_process: Optional[Any] = None  # Track yt-dlp process for cleanup
+        # ── Timeout & robust cancellation ──
+        self._stopping: bool = False  # Global stop signal (for app close)
+        self._stop_event = threading.Event()  # Block new downloads when stopping
+        self._active_pids: dict[str, int] = {}  # item_id -> subprocess PID for force-kill
+        self._active_pids_lock = threading.Lock()  # Thread-safe PID tracking
+        self._timeout_secs: int = 600  # Default 10 min per item (can be config later)
+        self._download_start_time: dict[str, float] = {}  # item_id -> start timestamp
 
     def _new_id(self) -> str:
         self._id_counter += 1
@@ -618,6 +668,12 @@ class DownloadManager:
         for item in self._queue:
             if item.id == item_id and item.state == DownloadState.QUEUED:
                 item.state = DownloadState.CANCELLED
+        # Force-kill subprocess if running
+        pid = None
+        with self._active_pids_lock:
+            pid = self._active_pids.get(item_id)
+        if pid:
+            self._kill_process_tree(pid, item_id)
         log.info(f"Cancelled: {item_id}")
         self.on_update()
 
@@ -626,12 +682,93 @@ class DownloadManager:
             if item.state in (DownloadState.QUEUED,):
                 item.state = DownloadState.CANCELLED
                 self._cancelled_ids.add(item.id)
+        # Force-kill all active subprocesses
+        with self._active_pids_lock:
+            for item_id, pid in list(self._active_pids.items()):
+                self._kill_process_tree(pid, item_id)
         self.on_update()
 
     def clear_done(self):
         self._queue = [i for i in self._queue
                        if i.state not in (DownloadState.DONE, DownloadState.CANCELLED, DownloadState.FAILED)]
+        # Clean up tracking dicts
+        with self._active_pids_lock:
+            for item in self._queue:
+                self._active_pids.pop(item.id, None)
+                self._download_start_time.pop(item.id, None)
         self.on_update()
+
+    def _kill_process_tree(self, pid: int, item_id: str) -> bool:
+        """Force-kill subprocess and descendants. Windows & Unix compatible."""
+        try:
+            if sys.platform == "win32":
+                # Windows: taskkill with /T (tree) /F (force)
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True, timeout=3
+                )
+                success = result.returncode == 0
+            else:
+                # Unix: SIGTERM then SIGKILL
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    time.sleep(1)
+                except ProcessLookupError:
+                    success = True  # Already dead
+                    return success
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    success = True
+                except ProcessLookupError:
+                    success = True  # Already dead
+            
+            if success:
+                log.warning(f"Force-killed subprocess {pid} for {item_id}")
+            
+            with self._active_pids_lock:
+                self._active_pids.pop(item_id, None)
+            return success
+        except Exception as e:
+            log.error(f"Failed to kill process {pid}: {e}")
+            return False
+
+    def _cleanup_partial_file(self, item: DownloadItem) -> bool:
+        """Remove incomplete MP3 file if it exists. Returns True if cleaned."""
+        try:
+            out_dir = self.settings.data.output_dir
+            pattern = self.settings.data.naming_pattern
+            
+            # For playlists with subfolder, check playlist-specific folder
+            search_dir = out_dir
+            if item.is_playlist and self.settings.data.playlist_subfolder and item.dest_path:
+                search_dir = item.dest_path
+            
+            search_path = Path(search_dir)
+            if not search_path.exists():
+                return False
+            
+            # Look for .mp3 files in directory (including .mp3.part, .mp3.ytdl)
+            total_freed = 0
+            for pattern_match in search_path.glob(f"*.mp3*"):
+                # Only remove files that are likely incomplete/temporary
+                if pattern_match.suffix in (".part", ".ytdl", ".tmp") or \
+                   (pattern_match.suffix == ".mp3" and item.title and item.title in str(pattern_match)):
+                    try:
+                        size = pattern_match.stat().st_size
+                        pattern_match.unlink()
+                        total_freed += size
+                        log.info(f"Cleaned up partial file: {pattern_match.name}")
+                    except Exception as e:
+                        log.warning(f"Could not remove {pattern_match.name}: {e}")
+            
+            if total_freed > 0:
+                freed_mb = total_freed / (1024 * 1024)
+                log.info(f"Cleanup freed {freed_mb:.1f} MB for {item.id}")
+                return True
+            return False
+        except Exception as e:
+            log.error(f"Cleanup error for {item.id}: {e}")
+            return False
 
     @property
     def queue(self) -> List[DownloadItem]:
@@ -648,6 +785,11 @@ class DownloadManager:
     def _process(self):
         is_first = True
         while True:
+            # Check if app is shutting down
+            if self._stopping:
+                log.info("Download worker stopping (app closing)")
+                break
+            
             # Wait for unpause signal (responsive, not sleep-blocking)
             if not self._pause_event.wait(timeout=0.5):
                 continue  # Still paused, keep waiting
@@ -838,16 +980,56 @@ class DownloadManager:
     def _try_download(self, yt_dlp: Any, item: DownloadItem,
                       opts: dict[str, Any], retries: int,
                       out_dir: str) -> str:
-        """Attempt download with given opts. Returns 'done', 'cancelled', or error message."""
+        """Attempt download with given opts. Returns 'done', 'cancelled', or error message.
+        
+        Wraps execution with timeout + force-kill to prevent hanging processes.
+        """
+        # Record start time for timeout check
+        with self._active_pids_lock:
+            self._download_start_time[item.id] = time.time()
+        
         last_error = ""
         for attempt in range(1, retries + 1):
             if item.id in self._cancelled_ids:
                 item.state = DownloadState.CANCELLED
                 self.on_update()
                 return "cancelled"
+            
+            # Check if timeout already exceeded (safety check)
+            with self._active_pids_lock:
+                start = self._download_start_time.get(item.id, time.time())
+            elapsed = time.time() - start
+            if elapsed > self._timeout_secs:
+                msg = f"Download timeout exceeded ({elapsed:.0f}s > {self._timeout_secs}s)"
+                item.state = DownloadState.FAILED
+                item.error_msg = msg
+                self._cleanup_partial_file(item)
+                log.error(f"{msg}: {item.url}")
+                self.on_update()
+                return msg
+            
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(item.url, download=True)
+                # Set timeout for this attempt based on remaining time
+                remaining = self._timeout_secs - elapsed
+                attempt_timeout = max(remaining, 60)  # At least 60s per attempt
+                
+                # Execute download with timeout
+                result = self._download_with_timeout(
+                    yt_dlp, item, opts, attempt_timeout
+                )
+                
+                if result == "timeout":
+                    # Timeout hit — cleanup and fail
+                    item.state = DownloadState.FAILED
+                    item.error_msg = f"Download timeout ({attempt_timeout:.0f}s)"
+                    self._cleanup_partial_file(item)
+                    log.error(f"Timeout for {item.url}: {item.error_msg}")
+                    self.on_update()
+                    return item.error_msg
+                
+                # Download succeeded
+                if result[0] == "success":
+                    info = result[1]
                     if info:
                         item.title   = info.get("title", item.url)
                         item.channel = info.get("uploader", "")
@@ -858,13 +1040,24 @@ class DownloadManager:
                             item.dest_path = str(Path(out_dir) / playlist_name)
                         else:
                             item.dest_path = out_dir
-                item.state    = DownloadState.DONE
-                item.progress = 1.0
-                item.done_at  = datetime.now().isoformat()
-                self.history.add(item)
-                log.info(f"Done: {item.title}")
-                self.on_update()
-                return "done"
+                    item.state    = DownloadState.DONE
+                    item.progress = 1.0
+                    item.done_at  = datetime.now().isoformat()
+                    self.history.add(item)
+                    log.info(f"Done: {item.title}")
+                    self.on_update()
+                    
+                    # Cleanup tracking
+                    with self._active_pids_lock:
+                        self._active_pids.pop(item.id, None)
+                        self._download_start_time.pop(item.id, None)
+                    
+                    return "done"
+                else:
+                    # Error returned
+                    last_error = result[1] if isinstance(result, tuple) else str(result)
+                    raise Exception(last_error)
+            
             except Exception as e:
                 last_error = str(e)
                 if "Cancelado" in last_error:
@@ -873,7 +1066,9 @@ class DownloadManager:
                     log.info(f"Cancelled: {item.url}")
                     self.on_update()
                     return "cancelled"
+                
                 log.warning(f"Attempt {attempt}/{retries} failed for {item.url}: {e}")
+                
                 # Don't retry DPAPI errors — they'll fail every time
                 if "dpapi" in last_error.lower():
                     return last_error
@@ -888,7 +1083,51 @@ class DownloadManager:
                     return last_error
                 if attempt < retries:
                     time.sleep(2 ** attempt)
+        
         return last_error
+
+    def _download_with_timeout(self, yt_dlp: Any, item: DownloadItem,
+                               opts: dict[str, Any], timeout_secs: float) -> Any:
+        """Execute yt-dlp download with timeout. Returns ('success', info) or ('error', msg) or 'timeout'.
+        
+        If timeout is exceeded, forces process termination and returns 'timeout'.
+        """
+        result_holder = {"result": None, "error": None}
+        
+        def run_download():
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(item.url, download=True)
+                    result_holder["result"] = ("success", info)
+            except Exception as e:
+                result_holder["error"] = str(e)
+        
+        # Run in separate thread to allow timeout without hanging main thread
+        thread = threading.Thread(target=run_download, daemon=False)
+        thread.start()
+        thread.join(timeout=timeout_secs)
+        
+        if thread.is_alive():
+            # Timeout exceeded — thread is still running
+            # Try to force-kill any yt-dlp subprocess
+            try:
+                # Get current process info (this is a bit tricky in Python)
+                # Fall back to cleanup attempt
+                self._cleanup_partial_file(item)
+            except Exception as e:
+                log.warning(f"Cleanup during timeout failed: {e}")
+            
+            log.warning(f"Download timeout for {item.id} (exceeded {timeout_secs}s)")
+            return "timeout"
+        
+        # Thread finished
+        if result_holder["error"]:
+            return ("error", result_holder["error"])
+        
+        if result_holder["result"]:
+            return result_holder["result"]
+        
+        return ("error", "Unknown error")
 
 
 def _is_bot_block(msg: str) -> bool:
@@ -964,7 +1203,10 @@ def _is_cookie_access_error(msg: str) -> bool:
         "could not copy chrome cookie database" in m
         or "failed to decrypt with dpapi" in m
         or "could not decrypt" in m
-        or "cookie database" in m and ("copy" in m or "decrypt" in m)
+        or ("cookie database" in m and ("copy" in m or "decrypt" in m))
+        or ("cookie" in m and "database is locked" in m)
+        or ("cookie" in m and "permission denied" in m)
+        or ("cookies" in m and "sqlite" in m and ("locked" in m or "busy" in m))
     )
 
 
@@ -2159,15 +2401,38 @@ class AmericaApp(tk.Tk):
                 pass
 
     def _on_close(self):
+        """Graceful shutdown: cancel active downloads, sync threads, cleanup orphans."""
         active = [i for i in self.manager.queue
                   if i.state in (DownloadState.DOWNLOADING, DownloadState.CONVERTING)]
         if active:
-            if messagebox.askyesno("Sair", "Há downloads em andamento. Deseja cancelar e sair?",
-                                   icon="warning"):
-                self.manager.cancel_all()
-                self.destroy()
-        else:
-            self.destroy()
+            if not messagebox.askyesno("Sair", "Há downloads em andamento. Deseja cancelar e sair?",
+                                       icon="warning"):
+                return  # User said "don't close"
+        
+        # Signal manager to stop accepting new downloads
+        self.manager._stopping = True
+        self.manager._stop_event.set()  # Set stop signal
+        
+        # Cancel all active/queued downloads
+        self.manager.cancel_all()
+        
+        # Wait for worker thread to finish with timeout
+        if self.manager._worker and self.manager._worker.is_alive():
+            log.info("Waiting for download worker to finish...")
+            self.manager._worker.join(timeout=10)
+            
+            if self.manager._worker.is_alive():
+                log.error("Worker thread did not stop after 10s timeout — forcing termination")
+        
+        # Final cleanup: kill any orphaned subprocess PIDs
+        with self.manager._active_pids_lock:
+            for item_id, pid in list(self.manager._active_pids.items()):
+                self.manager._kill_process_tree(pid, item_id)
+            self.manager._active_pids.clear()
+            self.manager._download_start_time.clear()
+        
+        log.info("Application closing — downloads cancelled and cleaned up")
+        self.destroy()
 
 
 # ──────────────────────────────────────────────
