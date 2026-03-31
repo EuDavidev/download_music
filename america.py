@@ -20,17 +20,26 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Callable, Any
 from enum import Enum
+from collections import OrderedDict
+import urllib.request
+import urllib.error
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+import webbrowser
 
 # ──────────────────────────────────────────────
 #  CONSTANTS & CONFIG
 # ──────────────────────────────────────────────
 APP_NAME    = "América"
 APP_VERSION = "1.1.0"
+GITHUB_REPO = "eudavidev/download_music"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 APP_DATA    = Path.home() / "AppData" / "Local" / "America" if sys.platform == "win32" else Path.home() / ".america"
 APP_DATA.mkdir(parents=True, exist_ok=True)
 SETTINGS_FILE = APP_DATA / "settings.json"
 HISTORY_FILE  = APP_DATA / "history.json"
 LOG_FILE      = APP_DATA / "america.log"
+LOG_SERVER_PORT = 5000  # Local port for log server
+UPDATE_CHECK_INTERVAL = 3600  # Check for updates every 1 hour
 
 # Sora font (fallback cascade for cross-platform)
 FONT_SORA = ("Sora", 10)
@@ -50,14 +59,280 @@ def _get_ffmpeg_path() -> Optional[str]:
             return str(candidate)
     return None
 
+
+def _validate_ffmpeg_available() -> bool:
+    """Validate FFmpeg is available and functional (pre-flight check).
+    
+    Returns True if FFmpeg can run, False otherwise.
+    This prevents wasting bandwidth downloading video only to fail at conversion.
+    """
+    ffmpeg_path = _get_ffmpeg_path()
+    if ffmpeg_path:
+        exe = Path(ffmpeg_path) / "ffmpeg.exe"
+    else:
+        exe = "ffmpeg"
+    
+    try:
+        result = subprocess.run(
+            [str(exe), "-version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except Exception as e:
+        log.warning(f"FFmpeg validation failed: {e}")
+        return False
+
+
+def _check_app_update() -> Optional[dict[str, Any]]:
+    """Check GitHub for newer version. Returns release dict or None if up-to-date.
+    
+    Returns dict with keys: 'version', 'download_url', 'body' (changelog)
+    """
+    try:
+        req = urllib.request.Request(
+            GITHUB_API_URL,
+            headers={"User-Agent": "America-App"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+        
+        github_version = data.get("tag_name", "").lstrip("v")
+        if not github_version:
+            return None
+        
+        # Simple semver comparison (v1.1.0 > v1.0.0)
+        if _compare_versions(github_version, APP_VERSION) > 0:
+            # Find Windows installer download
+            downloads = data.get("assets", [])
+            installer = next(
+                (d for d in downloads if d["name"].endswith(".exe")),
+                None
+            )
+            if installer:
+                return {
+                    "version": github_version,
+                    "download_url": installer["browser_download_url"],
+                    "body": data.get("body", ""),
+                    "name": installer["name"]
+                }
+    except Exception as e:
+        log.warning(f"Update check failed: {e}")
+    
+    return None
+
+
+def _compare_versions(v1: str, v2: str) -> int:
+    """Compare two semver versions. Returns: 1 if v1>v2, -1 if v1<v2, 0 if equal."""
+    try:
+        parts1 = [int(x) for x in v1.split(".")]
+        parts2 = [int(x) for x in v2.split(".")]
+        
+        for p1, p2 in zip(parts1 + [0]*3, parts2 + [0]*3):
+            if p1 > p2:
+                return 1
+            elif p1 < p2:
+                return -1
+        return 0
+    except Exception:
+        return 0
+
+
+def _download_installer(url: str, dest_path: Path) -> bool:
+    """Download app installer from GitHub release.
+    
+    Returns True on success, False on error.
+    """
+    try:
+        log.info(f"Downloading update from {url}...")
+        
+        def _progress_hook(block_num, block_size, total_size):
+            downloaded = block_num * block_size
+            if total_size > 0:
+                percent = min(100, int(100 * downloaded / total_size))
+                if percent % 10 == 0:  # Log every 10%
+                    log.info(f"Download progress: {percent}%")
+        
+        urllib.request.urlretrieve(url, dest_path, _progress_hook)
+        log.info(f"Installer downloaded to {dest_path}")
+        return True
+    except Exception as e:
+        log.error(f"Download failed: {e}")
+        return False
+
+
+def _install_update(installer_path: Path) -> bool:
+    """Execute installer and restart app.
+    
+    Returns True on success, False on error.
+    """
+    try:
+        # Windows: run installer
+        if sys.platform == "win32":
+            subprocess.Popen([str(installer_path), "/SILENT", "/NORESTART"])
+            log.info("Installer started. App will restart after installation.")
+            return True
+    except Exception as e:
+        log.error(f"Could not execute installer: {e}")
+    
+    return False
+
+
+class LogViewerHandler(SimpleHTTPRequestHandler):
+    """HTTP handler to serve app logs for remote viewing."""
+    
+    def do_GET(self):
+        """Serve log file as JSON or HTML."""
+        if self.path == "/" or self.path == "/logs":
+            self._serve_logs_html()
+        elif self.path == "/logs.json":
+            self._serve_logs_json()
+        else:
+            self.send_error(404)
+    
+    def _serve_logs_html(self):
+        """Serve HTML dashboard for log viewing."""
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            # Keep only last 100 lines
+            recent_lines = lines[-100:]
+            
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>América - Log Viewer</title>
+    <style>
+        body {{ font-family: 'Courier New', monospace; margin: 20px; background: #0f1117; color: #f1f5f9; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        h1 {{ color: #3b82f6; }}
+        .log {{ background: #161b27; padding: 15px; border-radius: 8px; max-height: 600px; overflow-y: auto; }}
+        .log-line {{ margin: 5px 0; padding: 5px; border-left: 3px solid #374151; padding-left: 10px; }}
+        .info {{ border-left-color: #3b82f6; }}
+        .warning {{ border-left-color: #faca15; color: #faca15; }}
+        .error {{ border-left-color: #f05252; color: #f05252; }}
+        .timestamp {{ color: #64748b; font-size: 0.9em; }}
+        button {{ background: #1a56db; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; }}
+        button:hover {{ background: #1041b5; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 América - Log Viewer</h1>
+        <p>Logs recentes (últimas 100 linhas)</p>
+        <button onclick="location.reload()">🔄 Atualizar</button>
+        <div class="log">
+"""
+            
+            for line in recent_lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Colorize by level
+                css_class = "info"
+                if "[WARNING]" in line:
+                    css_class = "warning"
+                elif "[ERROR]" in line:
+                    css_class = "error"
+                
+                html += f'<div class="log-line {css_class}">{line}</div>'
+            
+            html += """
+        </div>
+    </div>
+</body>
+</html>"""
+            
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+        except Exception as e:
+            self.send_error(500)
+            log.error(f"Error serving HTML logs: {e}")
+    
+    def _serve_logs_json(self):
+        """Serve log file as JSON."""
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            # Keep only last 100 lines
+            recent_lines = [normalize_log_line(line.strip()) for line in lines[-100:] if line.strip()]
+            
+            data = {
+                "app": APP_NAME,
+                "version": APP_VERSION,
+                "timestamp": datetime.now().isoformat(),
+                "logs": recent_lines
+            }
+            
+            response = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+            
+            self.send_response(200)
+            self.send_header("Content-type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", len(response))
+            self.end_headers()
+            self.wfile.write(response)
+        except Exception as e:
+            self.send_error(500)
+            log.error(f"Error serving JSON logs: {e}")
+    
+    def log_message(self, format, *args):
+        """Suppress default logging."""
+        pass
+
+
+def normalize_log_line(line: str) -> dict[str, Any]:
+    """Parse log line into structured format."""
+    import re
+    match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d+) \[(.*?)\] (.*)", line)
+    if match:
+        return {
+            "timestamp": f"{match.group(1)}.{match.group(2)}",
+            "level": match.group(3),
+            "message": match.group(4)
+        }
+    return {"raw": line}
+
+
+def _start_log_server() -> Optional[threading.Thread]:
+    """Start HTTP server for log viewing on localhost:5000.
+    
+    Returns thread object or None if failed to start.
+    """
+    try:
+        server = HTTPServer(("127.0.0.1", LOG_SERVER_PORT), LogViewerHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        log.info(f"Log server started on http://127.0.0.1:{LOG_SERVER_PORT}")
+        return thread
+    except Exception as e:
+        log.error(f"Could not start log server: {e}")
+        return None
+
 # ──────────────────────────────────────────────
 #  LOGGING
 # ──────────────────────────────────────────────
+from logging.handlers import RotatingFileHandler
+
+_log_handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=5 * 1024 * 1024,  # 5 MB
+    backupCount=3,  # Keep 3 old logs
+    encoding="utf-8"
+)
+_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        _log_handler,
         logging.StreamHandler()
     ]
 )
@@ -160,6 +435,7 @@ class DownloadItem:
     quality:   str = "high"   # "normal" | "high"
 
 @dataclass
+@dataclass
 class Settings:
     output_dir:    str = str(Path.home() / "Downloads" / "América")
     naming_pattern: str = "{title}"  # {title}, {title} - {channel}
@@ -169,6 +445,8 @@ class Settings:
     playlist_subfolder: bool = True
     max_retries:   int = 3
     cookie_browser: str = "none"  # chrome, firefox, edge, brave, opera, none
+    auto_update:   bool = True  # Enable auto-update checks
+    enable_log_server: bool = True  # Enable local HTTP log server
 
 # ──────────────────────────────────────────────
 #  SETTINGS & HISTORY STORES
@@ -243,10 +521,28 @@ class HistoryStore:
 # ──────────────────────────────────────────────
 class LinkParser:
     YOUTUBE_PATTERNS = [
+        # Standard watch?v= format
         r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})",
+        r"(?:https?://)?(?:www\.)?youtube\.com/watch\?.*v=([a-zA-Z0-9_-]{11})",
+        # Short URL format
         r"(?:https?://)?youtu\.be/([a-zA-Z0-9_-]{11})",
+        r"youtu\.be/([a-zA-Z0-9_-]{11})",
+        # Shorts
         r"(?:https?://)?(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})",
+        # Embed format
         r"(?:https?://)?(?:www\.)?youtube\.com/embed/([a-zA-Z0-9_-]{11})",
+        # Legacy /v/ format
+        r"(?:https?://)?(?:www\.)?youtube\.com/v/([a-zA-Z0-9_-]{11})",
+        # Mobile formats
+        r"(?:https?://)?m\.youtube\.com/watch\?.*v=([a-zA-Z0-9_-]{11})",
+        r"(?:https?://)?m\.youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})",
+        # Live streams
+        r"(?:https?://)?(?:www\.)?youtube\.com/live/([a-zA-Z0-9_-]{11})",
+        # YouTube Music
+        r"(?:https?://)?(?:www\.)?music\.youtube\.com/watch\?.*v=([a-zA-Z0-9_-]{11})",
+        r"(?:https?://)?(?:www\.)?music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})",
+        # Privacy/nocookie embed
+        r"(?:https?://)?(?:www\.)?youtube-nocookie\.com/embed/([a-zA-Z0-9_-]{11})",
     ]
     PLAYLIST_PATTERN = r"(?:https?://)?(?:www\.)?youtube\.com/playlist\?list=([a-zA-Z0-9_-]+)"
 
@@ -282,10 +578,13 @@ class DownloadManager:
         self._current: Optional[DownloadItem] = None
         self._worker:  Optional[threading.Thread] = None
         self._paused:  bool = False
+        self._pause_event = threading.Event()  # Responsive pause without sleep()
+        self._pause_event.set()  # Start in non-paused state
         self._cancelled_ids: set = set()
         self._id_counter = 0
         self._consecutive_blocks: int = 0
         self._cooldown_secs: int = 0
+        self._ydl_process: Optional[Any] = None  # Track yt-dlp process for cleanup
 
     def _new_id(self) -> str:
         self._id_counter += 1
@@ -303,13 +602,15 @@ class DownloadManager:
 
     def pause(self):
         self._paused = True
+        self._pause_event.clear()  # Block processing thread
         log.info("Queue paused")
         self.on_update()
 
     def resume(self):
         self._paused = False
-        log.info("Queue resumed")
+        self._pause_event.set()  # Allow processing thread to continue
         self._maybe_start()
+        log.info("Queue resumed")
         self.on_update()
 
     def cancel(self, item_id: str):
@@ -347,9 +648,10 @@ class DownloadManager:
     def _process(self):
         is_first = True
         while True:
-            if self._paused:
-                time.sleep(0.5)
-                continue
+            # Wait for unpause signal (responsive, not sleep-blocking)
+            if not self._pause_event.wait(timeout=0.5):
+                continue  # Still paused, keep waiting
+            
             pending = [i for i in self._queue if i.state == DownloadState.QUEUED]
             if not pending:
                 break
@@ -363,13 +665,13 @@ class DownloadManager:
             if not is_first:
                 delay = random.uniform(2.0, 5.0)
                 log.info(f"Waiting {delay:.1f}s before next download...")
-                time.sleep(delay)
+                self._pause_event.wait(timeout=delay)  # Responsive wait
             is_first = False
 
             # Cooldown: if consecutive bot blocks detected, back off
             if self._cooldown_secs > 0:
                 log.warning(f"Cooldown: waiting {self._cooldown_secs}s after bot detection...")
-                time.sleep(self._cooldown_secs)
+                self._pause_event.wait(timeout=self._cooldown_secs)  # Responsive wait
                 self._cooldown_secs = 0
 
             self._download(item)
@@ -382,6 +684,15 @@ class DownloadManager:
         If YouTube blocks with bot/sign-in detection, retry WITH cookies.
         If cookie decryption fails (DPAPI on Chrome), report a clear message.
         """
+        # ── Pre-flight: Validate FFmpeg before wasting bandwidth ──
+        if not _validate_ffmpeg_available():
+            item.state = DownloadState.FAILED
+            item.error_msg = ("FFmpeg não encontrado. Instale em: ffmpeg.org "
+                            "ou: choco install ffmpeg (Windows)")
+            log.error(item.error_msg)
+            self.on_update()
+            return
+        
         try:
             import yt_dlp  # type: ignore
         except ImportError:
@@ -471,18 +782,35 @@ class DownloadManager:
 
         # ── Phase 2: if bot-detected, retry WITH cookies ──
         if _is_bot_block(result) and cookie_browser and cookie_browser != "none":
-            log.info(f"Bot detected for {item.url}, retrying with {cookie_browser} cookies...")
-            item.state = DownloadState.DETECTING
-            item.progress = 0.0
-            self.on_update()
+            cookie_targets = _cookie_targets_for_browser(cookie_browser)
 
-            cookie_opts = {**base_opts, "cookiesfrombrowser": (cookie_browser,)}
-            result = self._try_download(yt_dlp, item, cookie_opts, retries, out_dir)
-            if result == "done":
-                self._consecutive_blocks = 0
-                return
-            if result == "cancelled":
-                return
+            for browser, profile in cookie_targets:
+                if profile:
+                    profile_msg = f" ({profile})"
+                    cookie_tuple = (browser, profile)
+                else:
+                    profile_msg = ""
+                    cookie_tuple = (browser,)
+
+                log.info(f"Bot detected for {item.url}, retrying with {browser} cookies{profile_msg}...")
+                item.state = DownloadState.DETECTING
+                item.progress = 0.0
+                self.on_update()
+
+                cookie_opts = {**base_opts, "cookiesfrombrowser": cookie_tuple}
+                result = self._try_download(yt_dlp, item, cookie_opts, retries, out_dir)
+                if result == "done":
+                    self._consecutive_blocks = 0
+                    return
+                if result == "cancelled":
+                    return
+
+                # If cookie access itself failed, we can try another browser fallback.
+                if _is_cookie_access_error(result):
+                    log.warning(f"Cookie access failed with {browser}: {result}")
+                    continue
+                # For other errors (e.g., still blocked/sign-in), stop fallback chain.
+                break
 
         # ── Track consecutive blocks for queue-level backoff ──
         if _is_bot_block(result):
@@ -549,6 +877,9 @@ class DownloadManager:
                 # Don't retry DPAPI errors — they'll fail every time
                 if "dpapi" in last_error.lower():
                     return last_error
+                # Don't retry cookie DB/decryption access errors — usually deterministic
+                if _is_cookie_access_error(last_error):
+                    return last_error
                 # Don't retry 429 — rate limit persists through quick retries
                 if _is_rate_limited(last_error):
                     return last_error
@@ -575,6 +906,66 @@ def _is_rate_limited(msg: str) -> bool:
 def _is_nsig_error(msg: str) -> bool:
     """Check if the error indicates an outdated yt-dlp (nsig decryption failure)."""
     return "nsig" in msg.lower()
+
+
+def _chrome_profiles_to_try() -> list[str]:
+    """Return likely Chrome profile names in best-effort order."""
+    defaults = ["Default", "Profile 1", "Profile 2", "Profile 3"]
+    if sys.platform != "win32":
+        return defaults
+
+    local_state = Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Local State"
+    if not local_state.exists():
+        return defaults
+
+    try:
+        data = json.loads(local_state.read_text(encoding="utf-8"))
+        info_cache = data.get("profile", {}).get("info_cache", {})
+        if isinstance(info_cache, dict):
+            ordered = [k for k in info_cache.keys() if isinstance(k, str) and k.strip()]
+            merged = list(OrderedDict.fromkeys(defaults + ordered))
+            return merged[:8]
+    except Exception as exc:
+        log.warning(f"Could not read Chrome profile list: {exc}")
+    return defaults
+
+
+def _cookie_targets_for_browser(cookie_browser: str) -> list[tuple[str, Optional[str]]]:
+    """Build browser/profile attempts for cookies-from-browser fallback."""
+    targets: list[tuple[str, Optional[str]]] = [(cookie_browser, None)]
+
+    if cookie_browser == "chrome":
+        for profile in _chrome_profiles_to_try():
+            targets.append(("chrome", profile))
+    elif cookie_browser in ("edge", "brave", "opera"):
+        # Chromium browsers frequently fail in some Windows setups; try Chrome next.
+        targets.append(("chrome", None))
+        for profile in _chrome_profiles_to_try():
+            targets.append(("chrome", profile))
+        targets.append(("firefox", None))
+    elif cookie_browser == "firefox":
+        targets.append(("chrome", None))
+
+    # Deduplicate while preserving order.
+    dedup: list[tuple[str, Optional[str]]] = []
+    seen: set[tuple[str, Optional[str]]] = set()
+    for t in targets:
+        if t in seen:
+            continue
+        seen.add(t)
+        dedup.append(t)
+    return dedup
+
+
+def _is_cookie_access_error(msg: str) -> bool:
+    """Check if the error indicates browser cookie DB/decryption access failure."""
+    m = msg.lower()
+    return (
+        "could not copy chrome cookie database" in m
+        or "failed to decrypt with dpapi" in m
+        or "could not decrypt" in m
+        or "cookie database" in m and ("copy" in m or "decrypt" in m)
+    )
 
 
 def _auto_update_ytdlp() -> bool:
@@ -614,32 +1005,127 @@ def _auto_update_ytdlp() -> bool:
 
 
 def _friendly_error(msg: str) -> str:
+    """Map yt-dlp errors to user-friendly Portuguese messages (40+ patterns)."""
     msg_l = msg.lower()
+    
+    # ── Chrome & DPAPI (Windows credential store)
     if "dpapi" in msg_l or "failed to decrypt" in msg_l:
-        return ("Não foi possível ler os cookies do Chrome (DPAPI). "
-                "Troque para Firefox nos Ajustes ou defina cookies como 'Nenhum'")
-    if "sign in" in msg_l or "bot" in msg_l:
-        return "YouTube bloqueou o acesso. Configure o navegador de cookies nos Ajustes"
-    if "private" in msg_l or "unavailable" in msg_l:
-        return "Conteúdo indisponível ou privado"
-    if "network" in msg_l or "connection" in msg_l or "timed out" in msg_l:
-        return "Erro de rede. Verifique sua conexão"
-    if "ffmpeg" in msg_l:
-        return "FFmpeg não encontrado. Instale o FFmpeg e reinicie o app"
-    if "permission" in msg_l or "access denied" in msg_l:
-        return "Sem permissão de escrita. Troque a pasta de destino"
+        return ("Não consegui descriptografar os cookies do Chrome (DPAPI). "
+                "Feche o Chrome, abra o app SEM modo Administrador e tente novamente")
+    if "could not copy chrome cookie database" in msg_l:
+        return ("Não consegui acessar o banco de cookies do Chrome. "
+                "Feche TODAS as janelas do Chrome e tente novamente")
+    
+    # ── YouTube detection & authentication
+    if "sign in" in msg_l or ("bot" in msg_l and "detected" in msg_l):
+        return "YouTube bloqueou o acesso. Configure um navegador nos Ajustes para usar cookies"
+    if "bot" in msg_l or "captcha" in msg_l:
+        return "YouTube ativou proteção anti-bot. Aguarde e tente novamente"
+    if "confirm your age" in msg_l or "age-restricted" in msg_l:
+        return "Conteúdo restrito por idade. Configure um navegador com login nos Ajustes"
+    
+    # ── Content availability
+    if "private" in msg_l or "privado" in msg_l:
+        return "Vídeo é privado - acesso negado"
+    if "unavailable" in msg_l or "indisponível" in msg_l:
+        return "Vídeo não está disponível (pode ter sido removido ou deletado)"
+    if "removed" in msg_l or "deleted" in msg_l or "removido" in msg_l:
+        return "Vídeo foi removido ou deletado"
+    if "geo-restricted" in msg_l or "geoblocked" in msg_l or "geograficamente" in msg_l:
+        return "Vídeo não está disponível em sua região"
+    
+    # ── Network errors
+    if "network" in msg_l or "rede" in msg_l:
+        return "Erro de rede - verifique sua conexão com a internet"
+    if "connection" in msg_l or "conexão" in msg_l or "conectar" in msg_l:
+        return "Não consegui conectar ao YouTube - verifique sua internet"
+    if "timed out" in msg_l or "timeout" in msg_l or "tempo esgotado" in msg_l:
+        return "Conexão lenta ou expirou - tente novamente"
+    if "dns" in msg_l or "resolve" in msg_l:
+        return "Erro de DNS - não consegui resolver YouTube. Verifique seu WiFi/internet"
+    if "ssl" in msg_l or "certificate" in msg_l or "certificado" in msg_l:
+        return "Erro de segurança SSL/TLS - sua internet pode estar bloqueando YouTube"
+    
+    # ── Rate limiting & quotas
     if "429" in msg_l or "too many requests" in msg_l:
-        return ("YouTube limitou as requisições. O app aguardará antes de continuar. "
-                "Tente reduzir o número de downloads simultâneos.")
-    if "nsig" in msg_l:
+        return ("YouTube limitou as requisições (HTTP 429). "
+                "App aguardará 1-10 min antes de continuar. Tente reduzir downloads simultâneos.")
+    if "quota" in msg_l or "quota exceeded" in msg_l or "cota" in msg_l:
+        return "Cota de API do YouTube atingida - tente amanhã"
+    if "rate limit" in msg_l or "rate limiting" in msg_l:
+        return "YouTube limitou a velocidade - aguarde alguns minutos"
+    
+    # ── FFmpeg issues
+    if "ffmpeg" in msg_l:
+        if "not found" in msg_l or "não encontrado" in msg_l:
+            return "FFmpeg não encontrado - baixe em ffmpeg.org ou instale via: choco install ffmpeg"
+        if "executable" in msg_l or "executável" in msg_l:
+            return "FFmpeg não é executável - reinstale FFmpeg ou dê permissões"
+        if "subprocess" in msg_l:
+            return "FFmpeg falhou na conversão - reinstale FFmpeg"
+        return "Erro no FFmpeg durante conversão de áudio"
+    if "audio extraction" in msg_l or "extração de áudio" in msg_l:
+        return "Não consegui extrair áudio - verifique FFmpeg"
+    if "post-processing" in msg_l or "post-process" in msg_l or "pós-processamento" in msg_l:
+        return "Erro na conversão (pós-processamento) - verifique FFmpeg"
+    
+    # ── Permission & filesystem
+    if "permission" in msg_l or "permissão" in msg_l or "access denied" in msg_l or "acesso negado" in msg_l:
+        return "Sem permissão de escrita - escolha outra pasta em Ajustes"
+    if "read-only" in msg_l or "somente leitura" in msg_l:
+        return "Pasta é somente leitura - escolha outra pasta"
+    if "no space" in msg_l or "disk full" in msg_l or "disco cheio" in msg_l:
+        return "Sem espaço em disco - libere espaço ou mude a pasta de saída"
+    if "invalid path" in msg_l or "caminho inválido" in msg_l:
+        return "Caminho de arquivo inválido - verifique a pasta em Ajustes"
+    if "cannot create" in msg_l or "não conseguiu criar" in msg_l:
+        return "Não consegui criar arquivo - verifique permissões e espaço em disco"
+    
+    # ── yt-dlp version issues
+    if "nsig" in msg_l or "n-transform" in msg_l:
         if getattr(sys, "frozen", False):
-            return "yt-dlp desatualizado. Baixe a nova versão do app."
-        return "yt-dlp desatualizado. A atualização automática falhou. Execute: pip install -U yt-dlp"
-    if "precondition" in msg_l:
-        return "YouTube bloqueou temporariamente. O app aguardará antes de tentar novamente."
-    if "confirm your age" in msg_l:
-        return "Conteúdo restrito por idade. Configure um navegador nos Ajustes."
-    return "Erro inesperado. Tente novamente"
+            return ("yt-dlp desatualizado internamente - baixe a versão mais nova do app. "
+                    "Se o problema persistir, reporte em GitHub.")
+        return "yt-dlp desatualizado - execute: pip install -U yt-dlp"
+    if "extract_info" in msg_l or "extrair informações" in msg_l:
+        return "Não consegui extrair informações do YouTube - atualize yt-dlp"
+    
+    # ── Specific HTTP errors
+    if "403" in msg_l or "forbidden" in msg_l or "proibido" in msg_l:
+        return "Acesso proibido (403) - YouTube negou acesso"
+    if "404" in msg_l or "not found" in msg_l or "não encontrado" in msg_l:
+        return "Vídeo não encontrado (404) - link inválido ou vídeo deletado"
+    if "410" in msg_l or "gone" in msg_l:
+        return "Vídeo foi permanentemente removido (410)"
+    if "503" in msg_l or "service unavailable" in msg_l or "serviço indisponível" in msg_l:
+        return "YouTube indisponível no momento - tente em alguns minutos"
+    
+    # ── Playlist errors
+    if "playlist" in msg_l or "lista de reprodução" in msg_l:
+        if "empty" in msg_l or "vazia" in msg_l:
+            return "Playlist vazia ou privada"
+        if "invalid" in msg_l or "inválida" in msg_l:
+            return "ID de playlist inválido"
+        return "Erro ao processar playlist - verifique o link"
+    
+    # ── Preconditions & platform-specific
+    if "precondition" in msg_l or "pré-condição" in msg_l:
+        return "YouTube bloqueou condicionalmente - é temporário, aguarde alguns minutos"
+    if "405" in msg_l or "method not allowed" in msg_l:
+        return "Método não permitido - error servidor YouTube (403/405)"
+    
+    # ── Generic fallbacks
+    if "error" in msg_l or "error" in msg_l or "falha" in msg_l:
+        # Try to extract some context
+        if "youtube" in msg_l:
+            return "Erro ao processar vídeo do YouTube - tente novamente"
+        if "http" in msg_l or "request" in msg_l:
+            return "Erro na comunicação com YouTube - verifique sua internet"
+        if "file" in msg_l or "arquivo" in msg_l:
+            return "Erro ao salvar arquivo - verifique permissões e espaço"
+    
+    # ── Last resort
+    return f"Erro inesperado: {msg[:80]}... Tente novamente ou reporte em GitHub"
 
 # ──────────────────────────────────────────────
 #  CUSTOM WIDGETS
@@ -679,16 +1165,21 @@ class RoundedFrame(tk.Canvas):
 
 
 class ProgressBar(tk.Canvas):
-    def __init__(self, parent, height=6, bg_color="#E5E7EB", fill_color="#1A56DB", **kw):
+    def __init__(self, parent, height=6, bg_color="#E5E7EB", fill_color="#1A56DB", text_color="#111827", **kw):
         super().__init__(parent, height=height, highlightthickness=0, bd=0, **kw)
         self["bg"] = bg_color
         self._fill  = fill_color
         self._bg    = bg_color
+        self._text_color = text_color
         self._value = 0.0
+        self._show_percentage = False  # Will be set based on height
         self.bind("<Configure>", self._redraw)
 
-    def set(self, value: float):
+    def set(self, value: float, show_percentage: bool = None):
+        """Set progress value (0.0-1.0) and optionally show percentage text."""
         self._value = max(0.0, min(1.0, value))
+        if show_percentage is not None:
+            self._show_percentage = show_percentage
         self._redraw()
 
     def _redraw(self, _=None):
@@ -696,14 +1187,28 @@ class ProgressBar(tk.Canvas):
         w = self.winfo_width()
         h = self.winfo_height()
         r = h // 2
-        # track
+        
+        # track (background)
         self._rounded(0, 0, w, h, r, self._bg)
+        
         # fill
         fw = int(w * self._value)
         if fw > r * 2:
             self._rounded(0, 0, fw, h, r, self._fill)
         elif fw > 0:
             self.create_oval(0, 0, h, h, fill=self._fill, outline="")
+        
+        # percentage text (if height >= 20 for readability)
+        if self._show_percentage or h >= 20:
+            pct = int(self._value * 100)
+            font_size = max(8, min(h - 4, 12))
+            self.create_text(
+                w // 2, h // 2,
+                text=f"{pct}%",
+                fill=self._text_color,
+                font=("Sora", font_size, "bold"),
+                anchor="center"
+            )
 
     def _rounded(self, x1, y1, x2, y2, r, color):
         pts = [x1+r,y1, x2-r,y1, x2,y1, x2,y1+r,
@@ -822,6 +1327,85 @@ class AmericaApp(tk.Tk):
         self._current_tab = "home"
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         log.info(f"América {APP_VERSION} iniciado")
+        
+        # ── Start log server ──
+        if self.settings.data.enable_log_server:
+            _start_log_server()
+        
+        # ── Check for updates (async) ──
+        if self.settings.data.auto_update:
+            threading.Thread(target=self._check_updates_async, daemon=True).start()
+
+    def _check_updates_async(self):
+        """Check for updates in background thread."""
+        try:
+            time.sleep(2)  # Wait for UI to fully load
+            update_info = _check_app_update()
+            if update_info:
+                self.after(0, self._show_update_dialog, update_info)
+        except Exception as e:
+            log.error(f"Update check error: {e}")
+    
+    def _show_update_dialog(self, update_info: dict[str, Any]):
+        """Show dialog offering to download and install update."""
+        result = messagebox.askyesno(
+            "Atualização Disponível",
+            f"Nova versão {update_info['version']} disponível!\n\n"
+            f"Changelog:\n{update_info['body'][:200]}...\n\n"
+            "Deseja baixar e instalar agora?"
+        )
+        
+        if result:
+            self.toast.show("Baixando e instalando atualização...", kind="info", duration=5000)
+            threading.Thread(
+                target=self._download_and_install_update,
+                args=(update_info,),
+                daemon=True
+            ).start()
+    
+    def _download_and_install_update(self, update_info: dict[str, Any]):
+        """Download and install update."""
+        try:
+            tmp_dir = APP_DATA / "updates"
+            tmp_dir.mkdir(exist_ok=True)
+            installer_path = tmp_dir / update_info["name"]
+            
+            if _download_installer(update_info["download_url"], installer_path):
+                if _install_update(installer_path):
+                    self.after(
+                        3000,
+                        lambda: self.toast.show(
+                            "Instalação iniciada. App será reiniciado.",
+                            kind="success",
+                            duration=5000
+                        )
+                    )
+                    self.after(5000, self.quit)
+                else:
+                    self.after(
+                        0,
+                        lambda: self.toast.show(
+                            "Erro ao instalar atualização",
+                            kind="error"
+                        )
+                    )
+            else:
+                self.after(
+                    0,
+                    lambda: self.toast.show(
+                        "Erro ao baixar atualização",
+                        kind="error"
+                    )
+                )
+        except Exception as e:
+            log.error(f"Update installation error: {e}")
+            self.after(
+                0,
+                lambda: self.toast.show(
+                    f"Erro: {str(e)[:50]}",
+                    kind="error"
+                )
+            )
 
     # ── Icon ───────────────────────────────────
     def _set_icon(self):
@@ -995,6 +1579,32 @@ class AmericaApp(tk.Tk):
                              highlightthickness=1)
         url_entry.pack(side="left", fill="x", expand=True, ipady=9, padx=(0, 10))
         url_entry.bind("<Return>", lambda e: self._add_url())
+        
+        # ── Context menu for URL entry (right-click paste) ──
+        def _on_url_right_click(event):
+            """Show context menu with Paste, Clear options."""
+            context_menu = tk.Menu(url_entry, tearoff=False, bg=t["bg2"], fg=t["text"])
+            context_menu.add_command(
+                label="📋 Colar", 
+                command=lambda: url_entry.insert(tk.END, url_entry.clipboard_get()) if self.clipboard_get() else None
+            )
+            context_menu.add_command(
+                label="✕ Limpar",
+                command=lambda: url_entry.delete(0, tk.END)
+            )
+            context_menu.add_separator()
+            context_menu.add_command(
+                label="⬇ Baixar",
+                command=self._add_url
+            )
+            try:
+                context_menu.tk_popup(event.x_root, event.y_root)
+            except Exception:
+                pass
+            finally:
+                context_menu.grab_release()
+        
+        url_entry.bind("<Button-3>", _on_url_right_click)
         url_entry.focus()
 
         self._url_status = tk.Label(url_row, text="", bg=t["card"],
@@ -1175,13 +1785,17 @@ class AmericaApp(tk.Tk):
                 tk.Label(meta_row, text=str(item.state.value), bg=t["card"],
                          fg=state_fg, font=("Sora", 8, "bold")).pack(side="right")
 
-            # progress bar
+            # progress bar with percentage display
             if item.state in (DownloadState.DOWNLOADING, DownloadState.CONVERTING,
                                DownloadState.QUEUED):
-                pb = ProgressBar(pad, height=4,
-                                  bg_color=t["progress_bg"], fill_color=t["progress_fill"])
-                pb.pack(fill="x", pady=(6, 0))
-                pb.set(item.progress)
+                pb_row = tk.Frame(pad, bg=t["card"])
+                pb_row.pack(fill="x", pady=(6, 0))
+                
+                pb = ProgressBar(pb_row, height=20,
+                                  bg_color=t["progress_bg"], fill_color=t["progress_fill"],
+                                  text_color=t["text"])
+                pb.pack(fill="x", expand=True)
+                pb.set(item.progress, show_percentage=True)
 
             # error
             if item.state == DownloadState.FAILED and item.error_msg:
@@ -1415,6 +2029,47 @@ class AmericaApp(tk.Tk):
                                font=("Sora", 9), cursor="hand2").pack(side="left", padx=(0, 12))
         field_row(content, "Tema", theme_row)
 
+        section("Sistema e Manutenção")
+        # ── Auto-update ──
+        s = self.settings.data
+        self._auto_update_var = tk.BooleanVar(value=getattr(s, 'auto_update', True))
+        def auto_update_row(parent):
+            cb = tk.Checkbutton(parent, text="Verificar atualizações automaticamente",
+                                variable=self._auto_update_var, bg=t["bg"],
+                                fg=t["text2"], selectcolor=t["card"],
+                                activebackground=t["bg"], font=("Sora", 9),
+                                cursor="hand2")
+            cb.pack(side="left", ipady=4)
+        field_row(content, "", auto_update_row)
+        
+        # ── Log Server ──
+        self._log_server_var = tk.BooleanVar(value=getattr(s, 'enable_log_server', True))
+        def log_server_row(parent):
+            cb = tk.Checkbutton(parent, text="Iniciar servidor local de logs",
+                                variable=self._log_server_var, bg=t["bg"],
+                                fg=t["text2"], selectcolor=t["card"],
+                                activebackground=t["bg"], font=("Sora", 9),
+                                cursor="hand2")
+            cb.pack(side="left", ipady=4)
+        field_row(content, "", log_server_row)
+        
+        # ── Open log dashboard (if enabled) ──
+        def open_logs():
+            if self._log_server_var.get():
+                webbrowser.open(f"http://127.0.0.1:{LOG_SERVER_PORT}")
+            else:
+                self.toast.show("Servidor de logs desativado. Ative nas configurações.", "warning")
+        def log_dashboard_row(parent):
+            make_btn(parent, "🔍 Abrir Dashboard de Logs", open_logs,
+                     style="info", theme=t).pack(side="left")
+        field_row(content, "", log_dashboard_row)
+        
+        # ── App version ──
+        version_info = f"Versão atual: {APP_VERSION}"
+        version_label = tk.Label(content, text=version_info, bg=t["bg"],
+                                  fg=t["text3"], font=("Sora", 8))
+        version_label.pack(fill="x", padx=20, pady=(10, 0))
+
         # ── Save ──
         save_row = tk.Frame(content, bg=t["bg"], pady=20)
         save_row.pack(fill="x")
@@ -1451,6 +2106,8 @@ class AmericaApp(tk.Tk):
             "Nenhum (desativado)": "none",
         }
         s.cookie_browser = _browser_reverse.get(self._cookie_browser_var.get(), "chrome")
+        s.auto_update = self._auto_update_var.get()
+        s.enable_log_server = self._log_server_var.get()
         old_theme = self._theme_name
         new_theme = self._set_theme.get()
         s.theme = new_theme

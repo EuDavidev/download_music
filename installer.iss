@@ -7,12 +7,12 @@ AppVersion=1.1.0
 AppPublisher=America
 DefaultDirName={localappdata}\America
 DefaultGroupName=America
-OutputDir=D:\backup\projetos_dev\America\installer_output
+OutputDir=D:\projetos_dev\America\installer_output
 OutputBaseFilename=America_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
-
+SetupIconFile=D:\projetos_dev\America\assets\icon.ico
 [Languages]
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -21,7 +21,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Criar atalho na area de trabalho"
 
 [Files]
-Source: "D:\backup\projetos_dev\America\dist\America\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "D:\projetos_dev\America\dist\America\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\America"; Filename: "{app}\America.exe"
