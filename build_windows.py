@@ -25,7 +25,7 @@ FFMPEG_DIR = BASE / "ffmpeg"
 INSTALLER_OUTPUT = BASE / "installer_output"
 
 APP_NAME = "America"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 FFMPEG_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 
