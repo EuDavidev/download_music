@@ -18,13 +18,17 @@ import shutil
 import yt_dlp
 
 from ..config import (
+    BASE_DIR,
     EPHEMERAL_TEMP_DIR,
     TEMP_FILE_TTL_MINUTES,
     MAX_CONCURRENT_DOWNLOADS,
     RATE_LIMIT_SLEEP_MIN,
     RATE_LIMIT_SLEEP_MAX,
     SOCKET_TIMEOUT,
-    DOWNLOAD_RETRIES
+    DOWNLOAD_RETRIES,
+    YOUTUBE_COOKIES_RAW,
+    YOUTUBE_COOKIES_FILE,
+    YOUTUBE_PROXY,
 )
 from ..models.download_models import DownloadJob, DownloadStatus
 from .ffmpeg_service import FFmpegService
@@ -42,6 +46,34 @@ class DownloadService:
         self.ffmpeg_path = FFmpegService.locate_ffmpeg()
         # Clean any old temporary files on startup
         self._purge_expired_temp_files()
+
+    def _resolve_cookie_file(self) -> Optional[str]:
+        """Resolves the best available cookie file for YouTube authentication without user interaction."""
+        # 1. Check if raw cookie content was passed in environment variable
+        if YOUTUBE_COOKIES_RAW:
+            cookie_dest = EPHEMERAL_TEMP_DIR / "server_yt_cookies.txt"
+            try:
+                if not cookie_dest.exists() or cookie_dest.read_text(encoding="utf-8") != YOUTUBE_COOKIES_RAW:
+                    cookie_dest.write_text(YOUTUBE_COOKIES_RAW, encoding="utf-8")
+                return str(cookie_dest)
+            except Exception as e:
+                logger.warning(f"Não foi possível gravar cookie de ambiente: {e}")
+
+        # 2. Check explicit path in environment variable
+        if YOUTUBE_COOKIES_FILE and Path(YOUTUBE_COOKIES_FILE).exists():
+            return YOUTUBE_COOKIES_FILE
+
+        # 3. Check Render default Secret Files location
+        render_secret = Path("/etc/secrets/cookies.txt")
+        if render_secret.exists():
+            return str(render_secret)
+
+        # 4. Check project root directory
+        root_cookies = BASE_DIR / "cookies.txt"
+        if root_cookies.exists():
+            return str(root_cookies)
+
+        return None
 
     def add_listener(self, listener: Callable[[Dict[str, Any]], Any]):
         self.listeners.append(listener)
@@ -76,7 +108,7 @@ class DownloadService:
         return False
 
     def _get_base_ytdlp_opts(self) -> Dict[str, Any]:
-        """Base yt-dlp configuration with anti-bot protection and rate limits."""
+        """Base yt-dlp configuration with anti-bot protection, smart clients, and rate limits."""
         opts: Dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -87,11 +119,12 @@ class DownloadService:
             "retries": DOWNLOAD_RETRIES,
             "fragment_retries": DOWNLOAD_RETRIES,
             "file_access_retries": 3,
-            # Anti-403 Forbidden: Use Android & iOS mobile player clients
+            "geo_bypass": True,
+            "source_address": "0.0.0.0",
+            # Anti-403 & Smart Player Clients (TV and mobile endpoints bypass datacenter bot challenges)
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "ios", "mweb"],
-                    "player_skip": ["js", "configs"],
+                    "player_client": ["tv", "tv_embedded", "android", "ios", "mweb", "web"],
                 }
             },
             "http_headers": {
@@ -100,24 +133,52 @@ class DownloadService:
             }
         }
 
+        cookie_path = self._resolve_cookie_file()
+        if cookie_path:
+            opts["cookiefile"] = cookie_path
+            logger.info(f"Carregando autenticação de cookies: {cookie_path}")
+
+        if YOUTUBE_PROXY:
+            opts["proxy"] = YOUTUBE_PROXY
+            logger.info(f"Roteando conexões através do proxy configurado.")
+
         if self.ffmpeg_path:
             opts["ffmpeg_location"] = self.ffmpeg_path
 
         return opts
 
     async def extract_info(self, url: str) -> Dict[str, Any]:
-        """Extract metadata for video or playlist without downloading."""
+        """Extract metadata for video or playlist without downloading, with client fallback."""
         loop = asyncio.get_running_loop()
 
-        def _extract():
-            ydl_opts = self._get_base_ytdlp_opts()
-            ydl_opts.update({
-                "extract_flat": "in_playlist",
-                "skip_download": True,
-            })
+        client_tiers = [
+            ["tv", "tv_embedded"],
+            ["android", "ios"],
+            ["mweb", "web_creator"],
+            ["web"]
+        ]
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(url, download=False)
+        def _extract():
+            last_ex = None
+            for clients in client_tiers:
+                ydl_opts = self._get_base_ytdlp_opts()
+                ydl_opts.update({
+                    "extract_flat": "in_playlist",
+                    "skip_download": True,
+                })
+                ydl_opts["extractor_args"]["youtube"]["player_client"] = clients
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        if info:
+                            return info
+                except Exception as ex:
+                    last_ex = ex
+                    logger.debug(f"Tentativa de extração com clientes {clients} falhou: {ex}. Tentando próximo...")
+
+            if last_ex:
+                raise last_ex
+            raise ValueError("Não foi possível obter informações da URL informada.")
 
         try:
             info = await loop.run_in_executor(None, _extract)
@@ -446,11 +507,12 @@ class DownloadService:
                 ],
             })
 
-        # Client strategy fallback loop (Android -> iOS -> Web)
+        # Client strategy fallback loop (Smart TV -> Android/iOS -> Mobile Web -> Web)
         client_strategies = [
+            ["tv", "tv_embedded"],
             ["android", "ios"],
-            ["ios", "mweb"],
-            ["web_creator", "mweb"],
+            ["mweb", "web_creator"],
+            ["web"],
         ]
 
         last_err = None
@@ -503,9 +565,9 @@ class DownloadService:
     def _translate_error(self, err_str: str) -> str:
         """Translates technical errors to user-friendly Portuguese."""
         if "403" in err_str or "Forbidden" in err_str:
-            return "O YouTube bloqueou temporariamente este vídeo. Tentando conexão alternativa..."
+            return "O YouTube bloqueou temporariamente esta conexão. Tentando rota alternativa..."
         if "Sign in to confirm" in err_str or "bot" in err_str.lower():
-            return "O YouTube solicitou verificação antibot para esta música."
+            return "O YouTube solicitou verificação antibot. O servidor está tentando rotas alternativas..."
         if "Private video" in err_str or "Privado" in err_str:
             return "Este vídeo é privado e não pode ser acessado."
         if "Video unavailable" in err_str or "Indisponível" in err_str:

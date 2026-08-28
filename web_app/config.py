@@ -35,3 +35,8 @@ DOWNLOAD_RETRIES = int(os.environ.get("DOWNLOAD_RETRIES", 5))
 # Server Network Settings
 SERVER_HOST = os.environ.get("HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("PORT", 8000))
+
+# Cloud & Anti-Bot Settings (for Render, AWS, Heroku, etc.)
+YOUTUBE_COOKIES_RAW = os.environ.get("YOUTUBE_COOKIES", "").strip()
+YOUTUBE_COOKIES_FILE = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
+YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "").strip() or os.environ.get("HTTP_PROXY", "").strip()
