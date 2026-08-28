@@ -1,33 +1,56 @@
 # 🎵 América
 
-> Conversor de YouTube para MP3 — Simples, rápido e bonito.
+> Conversor de YouTube para MP3 — Simples, rápido e bonito. Disponível em versão **Web (Nuvem / Celular / Qualquer Lugar)** e **Desktop (Windows)**.
 
-**América** é um aplicativo desktop para Windows que permite baixar músicas e playlists do YouTube em formato MP3 com uma interface moderna e intuitiva.
+**América** permite converter e baixar músicas e playlists do YouTube em formato MP3 de alta qualidade (320 kbps), M4A, FLAC e MP4 diretamente para o computador ou celular do usuário, sem acumular arquivos no servidor.
+
+---
+
+## 🌐 América Web (Pronto para Hospedagem na Nuvem & Atualizações Instantâneas)
+
+A versão Web foi projetada com arquitetura **Stateless & Efêmera**, ideal para hospedar em provedores de nuvem (Render, Railway, Fly.io, VPS, AWS, etc.):
+
+- ☁️ **Deploy Centralizado**: Quando você faz manutenção ou deploy no servidor, todos os clientes recebem a nova versão instantaneamente pelo navegador, sem precisar de visitas técnicas ou instalações manuais.
+- 📁 **Escolha da Pasta pelo Usuário**: O usuário escolhe a pasta do seu próprio computador onde deseja salvar as músicas (via *File System Access API*), ou utiliza o download padrão do navegador/celular.
+- 🗑️ **Zero Acúmulo no Servidor**: O servidor processa a conversão de forma temporária e descarta os arquivos temporários automaticamente (TTL) assim que são entregues ao cliente.
+
+### Como Executar Localmente:
+
+```bash
+# 1. Instale as dependências
+pip install -r requirements.txt
+
+# 2. Inicie o servidor Web
+python run_web.py
+# Ou dê duplo clique em start_web.bat no Windows
+```
+
+- **No Computador**: acesse `http://localhost:8000`
+- **No Celular / Dispositivos na mesma rede Wi-Fi**: acesse `http://SEU_IP_LOCAL:8000` (com QR Code integrado)
+
+### Hospedagem na Nuvem com Docker:
+
+```bash
+docker-compose up -d
+```
 
 ---
 
 ## ✨ Funcionalidades
 
+- 📁 **Escolha da Pasta Local** — O cliente escolhe onde salvar no próprio computador
 - 🎯 **Colar e baixar** — Cole o link, clique em "Baixar" e pronto
-- 📋 **Playlists** — Baixe playlists inteiras com subpasta automática por playlist
-- 🎚️ **Qualidade** — Escolha entre Alta (320 kbps) ou Normal (128 kbps)
-- 📂 **Fila de downloads** — Gerencie múltiplos downloads simultaneamente
-- ⏸️ **Controles** — Pause, retome ou cancele downloads a qualquer momento
-- 🕘 **Histórico** — Veja todos os downloads anteriores
-- 🌙 **Tema claro/escuro** — Alterne entre temas na interface
-- ⚙️ **Configurações** — Pasta de destino, padrão de nomes, subpastas por playlist
+- 📋 **Playlists** — Baixe playlists inteiras com seleção de faixas e empacotamento em ZIP
+- 🎚️ **Qualidade** — Escolha entre Alta (320 kbps), Normal (128 kbps), M4A, FLAC ou MP4
+- 🎧 **Player Web Integrado** — Escute as músicas baixadas diretamente no navegador
+- 📱 **Acesso Mobile & QR Code** — Conecte smartphones com facilidade
+- 📂 **Fila de downloads** — Gerencie múltiplos downloads com progresso em tempo real (WebSocket)
+- 🕘 **Histórico** — Veja e baixe novamente seus downloads anteriores
+- 🌙 **Tema claro/escuro** — Alterne entre temas com design moderno baseado em UI/UX Pro Max
 
 ---
 
-## 📸 Preview
-
-| Tema Claro | Tema Escuro |
-|:-:|:-:|
-| Interface limpa com azul, vermelho e branco | Modo escuro com cores suaves |
-
----
-
-## 🚀 Instalação
+## 🚀 Versão Desktop (Windows)
 
 ### Opção 1 — Instalador (recomendado)
 
@@ -40,17 +63,9 @@
 1. Baixe o `AmericaM.exe` na aba [Releases](../../releases)
 2. Dê duplo clique para abrir — sem instalação necessária
 
-### Opção 3 — Rodar o código fonte
+### Opção 3 — Rodar o código fonte Desktop
 
 ```bash
-# Clone o repositório
-git clone https://github.com/SEU_USUARIO/America.git
-cd America
-
-# Instale as dependências
-pip install -r requirements.txt
-
-# Execute
 python america.py
 ```
 

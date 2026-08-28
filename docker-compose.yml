@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  america-web:
+    build: .
+    container_name: america_web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./web_downloads:/app/web_downloads
+    environment:
+      - PORT=8000
+      - NO_BROWSER=1

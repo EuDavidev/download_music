@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>América Web — Conversor de YouTube para MP3 & Player</title>
+  <meta name="description" content="Baixe músicas e playlists do YouTube em MP3 de alta qualidade (320 kbps) diretamente para seu celular ou computador.">
+  
+  <!-- Google Fonts: Poppins & Righteous -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=Righteous&display=swap" rel="stylesheet">
+  
+  <!-- FontAwesome Icons for crisp SVG/Vector icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  
+  <!-- QR Code Library for easy phone pairing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-wrapper">
+    
+    <!-- TOP NAVIGATION HEADER -->
+    <header class="app-header">
+      <div class="header-container">
+        <div class="brand-group">
+          <div class="brand-logo">
+            <div class="logo-icon-wrapper">
+              <i class="fa-solid fa-music logo-icon"></i>
+            </div>
+            <div class="brand-text">
+              <span class="brand-title">AMÉRICA</span>
+              <span class="brand-tag">WEB MUSIC HUB</span>
+            </div>
+          </div>
+          <div class="status-pill" id="serverStatusPill" title="Status do servidor e WebSocket">
+            <span class="status-dot online"></span>
+            <span class="status-text">Conectado</span>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button class="btn-icon" id="btnSelectFolder" title="Escolher pasta no seu computador para salvar as músicas" aria-label="Escolher pasta no computador">
+            <i class="fa-solid fa-folder-open"></i>
+            <span class="btn-label-desktop" id="folderLabel">Pasta de Destino</span>
+          </button>
+          <button class="btn-icon" id="btnShareLan" title="Acessar pelo Celular (QR Code)" aria-label="Acessar no celular">
+            <i class="fa-solid fa-mobile-screen-button"></i>
+            <span class="btn-label-desktop">Usar no Celular</span>
+          </button>
+          <button class="btn-icon" id="btnToggleTheme" title="Alternar Tema Claro/Escuro" aria-label="Alternar tema">
+            <i class="fa-solid fa-moon" id="themeIcon"></i>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- MAIN CONTAINER -->
+    <main class="main-content">
+      
+      <!-- HERO & INPUT SECTION -->
+      <section class="hero-section">
+        <div class="hero-badge">
+          <i class="fa-solid fa-cloud"></i> Processamento em Nuvem • Salvo direto no seu dispositivo
+        </div>
+        <h1 class="hero-title">Baixe Músicas e Playlists <span class="gradient-text">do YouTube</span></h1>
+        <p class="hero-subtitle">Cole o link de qualquer vídeo ou playlist para baixar com máxima fidelidade em qualquer dispositivo.</p>
+
+        <!-- SEARCH INPUT BOX -->
+        <div class="search-card">
+          <div class="input-container">
+            <i class="fa-brands fa-youtube input-icon"></i>
+            <input 
+              type="text" 
+              id="urlInput" 
+              placeholder="Cole o link do YouTube aqui (ex: https://youtube.com/watch?v=... ou playlist)..." 
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="btn-paste" id="btnPaste" title="Colar da área de transferência">
+              <i class="fa-solid fa-paste"></i>
+              <span>Colar</span>
+            </button>
+            <button class="btn-clear hidden" id="btnClear" title="Limpar campo">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+
+          <!-- FORMAT & QUALITY PICKER -->
+          <div class="options-row">
+            <div class="options-group">
+              <span class="options-label"><i class="fa-solid fa-sliders"></i> Formato & Qualidade:</span>
+              <div class="format-chips">
+                <button class="chip active" data-format="mp3" data-quality="320">
+                  <i class="fa-solid fa-music"></i> MP3 320k <span class="chip-badge">HD</span>
+                </button>
+                <button class="chip" data-format="mp3" data-quality="128">
+                  <i class="fa-solid fa-music"></i> MP3 128k
+                </button>
+                <button class="chip" data-format="m4a" data-quality="0">
+                  <i class="fa-solid fa-file-audio"></i> M4A / AAC
+                </button>
+                <button class="chip" data-format="flac" data-quality="0">
+                  <i class="fa-solid fa-compact-disc"></i> FLAC (Lossless)
+                </button>
+                <button class="chip" data-format="mp4" data-quality="best">
+                  <i class="fa-solid fa-film"></i> MP4 (Vídeo)
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- MAIN ACTION BUTTON -->
+          <div class="action-btn-row">
+            <button class="btn-primary" id="btnFetch">
+              <span class="btn-content">
+                <i class="fa-solid fa-arrow-down-to-bracket"></i>
+                <span class="btn-text">Buscar & Baixar</span>
+              </span>
+              <div class="btn-spinner hidden" id="fetchSpinner"></div>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- PREVIEW CARD (Appears when video/playlist info is loaded) -->
+      <section class="preview-section hidden" id="previewSection">
+        <div class="preview-card">
+          <div class="preview-thumb-container">
+            <img src="" alt="Thumbnail" id="previewThumb" class="preview-thumb" />
+            <span class="duration-badge" id="previewDuration">00:00</span>
+          </div>
+          <div class="preview-details">
+            <div class="preview-type-tag" id="previewTypeTag">
+              <i class="fa-solid fa-music"></i> <span>Vídeo Único</span>
+            </div>
+            <h2 class="preview-title" id="previewTitle">Título da Música</h2>
+            <div class="preview-meta">
+              <span class="preview-uploader" id="previewUploader"><i class="fa-solid fa-user"></i> Canal</span>
+              <span class="preview-extra" id="previewExtra"><i class="fa-solid fa-circle-info"></i> Pronto para baixar</span>
+            </div>
+            
+            <div class="preview-actions" id="previewActions">
+              <button class="btn-action-primary" id="btnStartDownload">
+                <i class="fa-solid fa-download"></i> Iniciar Download Agora
+              </button>
+              <button class="btn-action-secondary hidden" id="btnOpenPlaylistModal">
+                <i class="fa-solid fa-list-check"></i> Escolher Músicas (<span id="playlistItemCount">0</span>)
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TABS SECTION: DOWNLOADS ATIVOS / HISTÓRICO -->
+      <section class="tabs-section">
+        <div class="tabs-header">
+          <button class="tab-btn active" id="tabBtnActive" data-tab="active">
+            <i class="fa-solid fa-circle-arrow-down"></i> Fila & Ativos (<span id="activeCount">0</span>)
+          </button>
+          <button class="tab-btn" id="tabBtnHistory" data-tab="history">
+            <i class="fa-solid fa-clock-rotate-left"></i> Histórico de Downloads
+          </button>
+        </div>
+
+        <!-- TAB CONTENT: ACTIVE DOWNLOADS -->
+        <div class="tab-content active" id="tabActive">
+          <div class="empty-state" id="emptyActive">
+            <div class="empty-icon"><i class="fa-solid fa-cloud-arrow-down"></i></div>
+            <h3>Nenhum download em andamento</h3>
+            <p>Cole um link acima para iniciar a conversão.</p>
+          </div>
+          <div class="downloads-grid" id="activeDownloadsGrid"></div>
+        </div>
+
+        <!-- TAB CONTENT: HISTORY -->
+        <div class="tab-content" id="tabHistory">
+          <div class="empty-state" id="emptyHistory">
+            <div class="empty-icon"><i class="fa-solid fa-compact-disc"></i></div>
+            <h3>Seu histórico está vazio</h3>
+            <p>Músicas baixadas com sucesso aparecerão aqui para você ouvir ou baixar novamente.</p>
+          </div>
+          <div class="history-list" id="historyList"></div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- FLOATING / STICKY AUDIO PLAYER BAR -->
+    <footer class="audio-player-bar hidden" id="audioPlayerBar">
+      <div class="player-container">
+        <!-- Track details -->
+        <div class="player-track-info">
+          <img src="" alt="Capa" id="playerCover" class="player-cover" />
+          <div class="player-text">
+            <div class="player-title" id="playerTitle">Nenhuma música selecionada</div>
+            <div class="player-artist" id="playerArtist">América Web Player</div>
+          </div>
+        </div>
+
+        <!-- Player Controls & Progress -->
+        <div class="player-center">
+          <div class="player-buttons">
+            <button class="btn-player-control" id="btnPlayerBack10" title="Voltar 10s">
+              <i class="fa-solid fa-rotate-left"></i>
+            </button>
+            <button class="btn-player-play" id="btnPlayerPlay" title="Reproduzir / Pausar">
+              <i class="fa-solid fa-play" id="playerPlayIcon"></i>
+            </button>
+            <button class="btn-player-control" id="btnPlayerFwd10" title="Avançar 10s">
+              <i class="fa-solid fa-rotate-right"></i>
+            </button>
+          </div>
+
+          <div class="player-timeline">
+            <span class="time-label" id="playerCurrentTime">00:00</span>
+            <input type="range" class="player-progress" id="playerProgress" min="0" max="100" value="0" step="0.1" />
+            <span class="time-label" id="playerTotalTime">00:00</span>
+          </div>
+        </div>
+
+        <!-- Right Side: Volume & Download Button -->
+        <div class="player-right">
+          <div class="volume-control">
+            <i class="fa-solid fa-volume-high" id="volumeIcon"></i>
+            <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.05" value="0.85" />
+          </div>
+          <a href="#" class="btn-player-save" id="btnPlayerSave" download title="Salvar no dispositivo">
+            <i class="fa-solid fa-download"></i>
+            <span class="btn-label-desktop">Salvar Arquivo</span>
+          </a>
+          <button class="btn-player-close" id="btnPlayerClose" title="Fechar Player">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </div>
+      <audio id="html5Audio" preload="auto"></audio>
+    </footer>
+
+    <!-- MODAL: PLAYLIST SELECTION -->
+    <div class="modal-overlay hidden" id="playlistModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <i class="fa-solid fa-list-check modal-icon"></i>
+            <div>
+              <h3 class="modal-title" id="modalPlaylistTitle">Músicas da Playlist</h3>
+              <p class="modal-subtitle">Selecione quais faixas deseja baixar no arquivo ZIP.</p>
+            </div>
+          </div>
+          <button class="modal-close-btn" id="btnClosePlaylistModal"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+
+        <div class="modal-toolbar">
+          <div class="selection-stats">
+            <span id="selectedCountBadge">0 de 0</span> selecionadas
+          </div>
+          <div class="selection-buttons">
+            <button class="btn-modal-tool" id="btnSelectAll">Marcar Todas</button>
+            <button class="btn-modal-tool" id="btnUnselectAll">Desmarcar Todas</button>
+          </div>
+        </div>
+
+        <div class="playlist-items-container" id="playlistItemsContainer"></div>
+
+        <div class="modal-footer">
+          <button class="btn-secondary" id="btnCancelPlaylist">Cancelar</button>
+          <button class="btn-primary" id="btnConfirmPlaylistDownload">
+            <i class="fa-solid fa-file-zipper"></i> Baixar Selecionadas em ZIP
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: LAN ACCESS & QR CODE -->
+    <div class="modal-overlay hidden" id="lanModal">
+      <div class="modal-card modal-sm">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <i class="fa-solid fa-mobile-screen-button modal-icon"></i>
+            <div>
+              <h3 class="modal-title">Acessar pelo Celular</h3>
+              <p class="modal-subtitle">Conecte seu celular na mesma rede Wi-Fi</p>
+            </div>
+          </div>
+          <button class="modal-close-btn" id="btnCloseLanModal"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+
+        <div class="modal-body text-center">
+          <div class="qr-container" id="qrCodeWrapper">
+            <div id="qrcode"></div>
+          </div>
+          <p class="lan-help-text">Abra a câmera do celular e escaneie o código QR acima ou digite no navegador:</p>
+          <div class="lan-url-box">
+            <span id="lanUrlText">http://192.168.1.X:8000</span>
+            <button class="btn-copy-url" id="btnCopyLanUrl" title="Copiar endereço">
+              <i class="fa-regular fa-copy"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: DESTINATION FOLDER SELECTION -->
+    <div class="modal-overlay hidden" id="folderModal">
+      <div class="modal-card modal-sm">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <i class="fa-solid fa-folder-open modal-icon"></i>
+            <div>
+              <h3 class="modal-title">Pasta de Destino no Computador</h3>
+              <p class="modal-subtitle">Escolha onde salvar suas músicas</p>
+            </div>
+          </div>
+          <button class="modal-close-btn" id="btnCloseFolderModal"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+
+        <div class="modal-body">
+          <div class="folder-status-box">
+            <div class="folder-status-title"><i class="fa-solid fa-hard-drive"></i> Pasta Atual Selecionada:</div>
+            <div class="folder-current-name" id="currentFolderText">Downloads do Navegador (Padrão)</div>
+          </div>
+
+          <div class="folder-options-list">
+            <button class="btn-primary full-width" id="btnPickDirectory">
+              <i class="fa-solid fa-folder-plus"></i> Escolher Outra Pasta no Computador
+            </button>
+            <button class="btn-secondary full-width" id="btnResetFolder">
+              <i class="fa-solid fa-rotate-left"></i> Usar Pasta Padrão de Downloads
+            </button>
+          </div>
+
+          <div class="folder-hint">
+            <i class="fa-solid fa-circle-info"></i> As conversões são processadas de forma temporária e segura na nuvem e salvas diretamente na pasta que você escolher no seu computador ou celular.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TOAST NOTIFICATION CONTAINER -->
+    <div class="toast-container" id="toastContainer"></div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
