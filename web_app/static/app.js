@@ -583,18 +583,29 @@
   }
 
   function createJobCardHTML(job) {
+    let badgeClass = 'badge-downloading';
+    let isConverting = false;
     let badgeText = job.status_label || 'Baixando';
-    if (job.status === 'preparing') {
+
+    if (job.status === 'preparing' || job.status === 'queued') {
       badgeClass = 'badge-downloading';
+      badgeText = job.status_label || 'Preparando...';
+    } else if (job.status === 'downloading') {
+      badgeClass = 'badge-downloading';
+      badgeText = job.status_label || 'Baixando...';
     } else if (job.status === 'converting') {
       badgeClass = 'badge-converting';
+      badgeText = job.status_label || 'Convertendo Áudio...';
       isConverting = true;
     } else if (job.status === 'completed') {
       badgeClass = 'badge-completed';
+      badgeText = job.status_label || 'Concluído';
     } else if (job.status === 'error') {
       badgeClass = 'badge-error';
+      badgeText = job.status_label || 'Erro';
     } else if (job.status === 'cancelled') {
       badgeClass = 'badge-error';
+      badgeText = job.status_label || 'Cancelado';
     }
 
     const thumb = job.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=60';
