@@ -1,0 +1,27 @@
+# fly.toml app configuration file for América Web
+# Documentação: https://fly.io/docs/reference/configuration/
+
+app = "america-music-web"
+primary_region = "gru" # Região de São Paulo (pode alterar se desejar)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+  NO_BROWSER = "1"
+  TEMP_FILE_TTL_MINUTES = "15"
+  MAX_CONCURRENT_DOWNLOADS = "3"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
