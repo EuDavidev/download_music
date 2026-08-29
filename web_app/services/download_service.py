@@ -108,7 +108,7 @@ class DownloadService:
         return False
 
     def _get_base_ytdlp_opts(self) -> Dict[str, Any]:
-        """Base yt-dlp configuration with anti-bot protection, smart clients, and rate limits."""
+        """Base yt-dlp configuration with rate limits, cookies, and proxy."""
         opts: Dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -121,12 +121,6 @@ class DownloadService:
             "file_access_retries": 3,
             "geo_bypass": True,
             "source_address": "0.0.0.0",
-            # Anti-403 & Smart Player Clients (TV and mobile endpoints bypass datacenter bot challenges)
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["tv", "tv_embedded", "android", "ios", "mweb", "web"],
-                }
-            },
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
                 "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -152,10 +146,10 @@ class DownloadService:
         loop = asyncio.get_running_loop()
 
         client_tiers = [
-            ["tv", "tv_embedded"],
-            ["android", "ios"],
-            ["mweb", "web_creator"],
-            ["web"]
+            None,  # Default (visionos / multi-client automatic selection)
+            ["android"],
+            ["web"],
+            ["mweb"]
         ]
 
         def _extract():
@@ -166,7 +160,8 @@ class DownloadService:
                     "extract_flat": "in_playlist",
                     "skip_download": True,
                 })
-                ydl_opts["extractor_args"]["youtube"]["player_client"] = clients
+                if clients:
+                    ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=False)
@@ -174,7 +169,7 @@ class DownloadService:
                             return info
                 except Exception as ex:
                     last_ex = ex
-                    logger.debug(f"Tentativa de extração com clientes {clients} falhou: {ex}. Tentando próximo...")
+                    logger.debug(f"Tentativa de extração com clientes {clients or 'default'} falhou: {ex}. Tentando próximo...")
 
             if last_ex:
                 raise last_ex
@@ -507,12 +502,12 @@ class DownloadService:
                 ],
             })
 
-        # Client strategy fallback loop (Smart TV -> Android/iOS -> Mobile Web -> Web)
+        # Fallback strategies: default (visionos / yt-dlp native) -> android -> web -> mweb
         client_strategies = [
-            ["tv", "tv_embedded"],
-            ["android", "ios"],
-            ["mweb", "web_creator"],
+            None,  # Native automatic multi-client resolution
+            ["android"],
             ["web"],
+            ["mweb"],
         ]
 
         last_err = None
@@ -520,7 +515,11 @@ class DownloadService:
             if job.cancelled:
                 return None
             try:
-                ydl_opts["extractor_args"]["youtube"]["player_client"] = clients
+                if clients:
+                    ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+                elif "extractor_args" in ydl_opts:
+                    ydl_opts.pop("extractor_args")
+
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.extract_info(url, download=True)
 
@@ -536,8 +535,8 @@ class DownloadService:
 
             except Exception as e:
                 last_err = e
-                logger.warning(f"Tentativa com clientes {clients} falhou: {e}. Tentando próximo cliente...")
-                time.sleep(1.0)
+                logger.warning(f"Tentativa com cliente {clients or 'default'} falhou: {e}. Tentando próximo cliente...")
+                time.sleep(0.5)
 
         if last_err:
             raise last_err
@@ -564,6 +563,8 @@ class DownloadService:
 
     def _translate_error(self, err_str: str) -> str:
         """Translates technical errors to user-friendly Portuguese."""
+        if "Requested format is not available" in err_str:
+            return "O formato de áudio para este vídeo não pôde ser extraído. Tente outro formato ou qualidade."
         if "403" in err_str or "Forbidden" in err_str:
             return "O YouTube bloqueou temporariamente esta conexão. Tentando rota alternativa..."
         if "Sign in to confirm" in err_str or "bot" in err_str.lower():
