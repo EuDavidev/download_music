@@ -898,6 +898,19 @@ class DownloadManager:
             base_opts["ffmpeg_location"] = ffmpeg_path
             log.info(f"Using bundled FFmpeg: {ffmpeg_path}")
 
+        # Check for cookies.txt file in project root, current directory, or APP_DATA
+        cookie_file = None
+        if Path("cookies.txt").exists():
+            cookie_file = "cookies.txt"
+        elif (Path(__file__).parent / "cookies.txt").exists():
+            cookie_file = str(Path(__file__).parent / "cookies.txt")
+        elif (APP_DATA / "cookies.txt").exists():
+            cookie_file = str(APP_DATA / "cookies.txt")
+
+        if cookie_file:
+            base_opts["cookiefile"] = cookie_file
+            log.info(f"Using cookies file: {cookie_file}")
+
         cookie_browser = self.settings.data.cookie_browser
         retries = self.settings.data.max_retries
 

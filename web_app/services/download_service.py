@@ -49,7 +49,16 @@ class DownloadService:
 
     def _resolve_cookie_file(self) -> Optional[str]:
         """Resolves the best available cookie file for YouTube authentication without user interaction."""
-        # 1. Check if raw cookie content was passed in environment variable
+        # 1. Direct cookies.txt in current working directory
+        if Path("cookies.txt").exists():
+            return "cookies.txt"
+
+        # 2. Check project root directory
+        root_cookies = BASE_DIR / "cookies.txt"
+        if root_cookies.exists():
+            return str(root_cookies)
+
+        # 3. Check if raw cookie content was passed in environment variable
         raw_env = os.environ.get("YOUTUBE_COOKIES", "").strip() or YOUTUBE_COOKIES_RAW
         if raw_env:
             # Handle potential escaped newlines from environment variables
@@ -73,20 +82,15 @@ class DownloadService:
             except Exception as e:
                 logger.warning(f"Não foi possível gravar cookie de ambiente: {e}")
 
-        # 2. Check explicit path in environment variable
+        # 4. Check explicit path in environment variable
         custom_file = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip() or YOUTUBE_COOKIES_FILE
         if custom_file and Path(custom_file).exists():
             return custom_file
 
-        # 3. Check Render default Secret Files location
+        # 5. Check Render default Secret Files location
         render_secret = Path("/etc/secrets/cookies.txt")
         if render_secret.exists():
             return str(render_secret)
-
-        # 4. Check project root directory
-        root_cookies = BASE_DIR / "cookies.txt"
-        if root_cookies.exists():
-            return str(root_cookies)
 
         return None
 
