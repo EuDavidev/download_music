@@ -126,6 +126,55 @@ class DownloadService:
             return True
         return False
 
+    def _resolve_proxy(self) -> Optional[str]:
+        """Resolves residential proxy from environment variables, proxy.txt, or proxies.txt."""
+        # 1. Environment variables
+        env_proxy = (
+            os.environ.get("YOUTUBE_PROXY", "").strip()
+            or os.environ.get("HTTP_PROXY", "").strip()
+            or os.environ.get("HTTPS_PROXY", "").strip()
+            or YOUTUBE_PROXY
+        )
+        if env_proxy:
+            return self._format_proxy_url(env_proxy)
+
+        # 2. Check proxy.txt or proxies.txt in current folder or root
+        proxy_files = [
+            Path("proxy.txt"),
+            Path("proxies.txt"),
+            BASE_DIR / "proxy.txt",
+            BASE_DIR / "proxies.txt",
+        ]
+        for pf in proxy_files:
+            if pf.exists():
+                try:
+                    lines = [line.strip() for line in pf.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+                    if lines:
+                        chosen = random.choice(lines)
+                        return self._format_proxy_url(chosen)
+                except Exception as e:
+                    logger.debug(f"Erro ao ler arquivo de proxy {pf}: {e}")
+
+        return None
+
+    def _format_proxy_url(self, raw_proxy: str) -> str:
+        """Standardize proxy formats like host:port:user:pass to http://user:pass@host:port."""
+        raw_proxy = raw_proxy.strip()
+        if not raw_proxy:
+            return ""
+        if raw_proxy.startswith(("http://", "https://", "socks5://", "socks4://")):
+            return raw_proxy
+        parts = raw_proxy.split(":")
+        if len(parts) == 4:
+            # host:port:user:pass
+            host, port, user, pwd = parts
+            return f"http://{user}:{pwd}@{host}:{port}"
+        elif len(parts) == 2:
+            # host:port
+            host, port = parts
+            return f"http://{host}:{port}"
+        return f"http://{raw_proxy}"
+
     def _get_base_ytdlp_opts(self) -> Dict[str, Any]:
         """Base yt-dlp configuration with rate limits, cookies, JS challenge solver, and proxy."""
         opts: Dict[str, Any] = {
@@ -158,9 +207,10 @@ class DownloadService:
             opts["cookiefile"] = cookie_path
             logger.info(f"Carregando autenticação de cookies: {cookie_path}")
 
-        if YOUTUBE_PROXY:
-            opts["proxy"] = YOUTUBE_PROXY
-            logger.info(f"Roteando conexões através do proxy configurado.")
+        proxy_url = self._resolve_proxy()
+        if proxy_url:
+            opts["proxy"] = proxy_url
+            logger.info(f"Roteando conexões através do proxy residencial configurado: {proxy_url.split('@')[-1]}")
 
         if self.ffmpeg_path:
             opts["ffmpeg_location"] = self.ffmpeg_path
