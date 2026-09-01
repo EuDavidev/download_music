@@ -108,7 +108,7 @@ class DownloadService:
         return False
 
     def _get_base_ytdlp_opts(self) -> Dict[str, Any]:
-        """Base yt-dlp configuration with rate limits, cookies, and proxy."""
+        """Base yt-dlp configuration with rate limits, cookies, JS challenge solver, and proxy."""
         opts: Dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -121,6 +121,13 @@ class DownloadService:
             "file_access_retries": 3,
             "geo_bypass": True,
             "source_address": "0.0.0.0",
+            "remote_components": ["ejs:github"],
+            "js_runtimes": {
+                "node": {},
+                "deno": {},
+                "quickjs": {},
+                "bun": {},
+            },
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
                 "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -146,10 +153,13 @@ class DownloadService:
         loop = asyncio.get_running_loop()
 
         client_tiers = [
-            None,  # Default (visionos / multi-client automatic selection)
+            None,  # Default (visionos / multi-client automatic selection with JS solver)
+            ["tv_embedded"],
+            ["android_music"],
+            ["mweb"],
             ["android"],
             ["web"],
-            ["mweb"]
+            ["ios"]
         ]
 
         def _extract():
@@ -159,6 +169,7 @@ class DownloadService:
                 ydl_opts.update({
                     "extract_flat": "in_playlist",
                     "skip_download": True,
+                    "ignore_no_formats_error": True,
                 })
                 if clients:
                     ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
@@ -170,6 +181,20 @@ class DownloadService:
                 except Exception as ex:
                     last_ex = ex
                     logger.debug(f"Tentativa de extração com clientes {clients or 'default'} falhou: {ex}. Tentando próximo...")
+
+            # Fallback flat extraction if all strict format checks failed
+            try:
+                flat_opts = self._get_base_ytdlp_opts()
+                flat_opts.update({
+                    "extract_flat": True,
+                    "skip_download": True,
+                })
+                with yt_dlp.YoutubeDL(flat_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        return info
+            except Exception as ex:
+                logger.debug(f"Fallback flat extraction falhou: {ex}")
 
             if last_ex:
                 raise last_ex
@@ -502,12 +527,15 @@ class DownloadService:
                 ],
             })
 
-        # Fallback strategies: default (visionos / yt-dlp native) -> android -> web -> mweb
+        # Fallback strategies: default (visionos / yt-dlp native with JS EJS solver) -> tv_embedded -> android_music -> mweb -> android -> web -> ios
         client_strategies = [
-            None,  # Native automatic multi-client resolution
+            None,  # Native automatic multi-client resolution with JS challenges
+            ["tv_embedded"],
+            ["android_music"],
+            ["mweb"],
             ["android"],
             ["web"],
-            ["mweb"],
+            ["ios"],
         ]
 
         last_err = None

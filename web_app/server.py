@@ -68,5 +68,15 @@ async def websocket_progress_endpoint(websocket: WebSocket):
         ws_controller.disconnect(websocket)
 
 
+# Favicon Routes
+@app.get("/favicon.ico", include_in_schema=False)
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_endpoint():
+    favicon_file = STATIC_DIR / "favicon.svg"
+    if favicon_file.exists():
+        return FileResponse(path=str(favicon_file), media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Favicon não encontrado")
+
+
 # Mount static frontend
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
