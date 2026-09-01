@@ -18,7 +18,7 @@ COPY . .
 EXPOSE 8080
 
 ENV NO_BROWSER=1
-ENV PORT=8000
+ENV PORT=8080
 
 # Start server
 CMD ["python", "run_web.py"]
