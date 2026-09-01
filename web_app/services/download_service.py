@@ -477,7 +477,7 @@ class DownloadService:
         if fmt == "mp3":
             bitrate = job.quality if job.quality in ("320", "192", "128") else "320"
             ydl_opts.update({
-                "format": "bestaudio/best",
+                "format": "bestaudio/best/ba/b",
                 "postprocessors": [
                     {
                         "key": "FFmpegExtractAudio",
@@ -489,7 +489,7 @@ class DownloadService:
             })
         elif fmt == "m4a":
             ydl_opts.update({
-                "format": "bestaudio[ext=m4a]/bestaudio/best",
+                "format": "bestaudio[ext=m4a]/bestaudio/best/ba/b",
                 "postprocessors": [
                     {
                         "key": "FFmpegExtractAudio",
@@ -501,7 +501,7 @@ class DownloadService:
             })
         elif fmt == "flac":
             ydl_opts.update({
-                "format": "bestaudio/best",
+                "format": "bestaudio/best/ba/b",
                 "postprocessors": [
                     {
                         "key": "FFmpegExtractAudio",
@@ -512,7 +512,7 @@ class DownloadService:
             })
         elif fmt == "mp4":
             ydl_opts.update({
-                "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best/b",
                 "merge_output_format": "mp4",
                 "postprocessors": [
                     {"key": "FFmpegMetadata", "add_metadata": True},
@@ -520,7 +520,7 @@ class DownloadService:
             })
         else:
             ydl_opts.update({
-                "format": "bestaudio/best",
+                "format": "bestaudio/best/ba/b",
                 "postprocessors": [
                     {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"},
                     {"key": "FFmpegMetadata", "add_metadata": True},
