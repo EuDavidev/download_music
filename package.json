@@ -1,0 +1,9 @@
+{
+  "name": "america-web-music",
+  "version": "2.0.0",
+  "description": "América Web Music Downloader Helper for JS Challenge Solver",
+  "private": true,
+  "engines": {
+    "node": ">=20.x"
+  }
+}
