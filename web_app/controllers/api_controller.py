@@ -147,13 +147,8 @@ async def cancel_job(
     download_svc: DownloadService = Depends(get_download_service)
 ):
     """Cancel an active download."""
-    success = download_svc.cancel_job(job_id)
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Download não encontrado ou já finalizado."
-        )
-    return {"success": True, "message": "Download cancelado com sucesso."}
+    download_svc.cancel_job(job_id)
+    return {"success": True, "message": "Download cancelado ou já finalizado."}
 
 
 @router.get("/file/{job_id}")

@@ -50,18 +50,33 @@ class DownloadService:
     def _resolve_cookie_file(self) -> Optional[str]:
         """Resolves the best available cookie file for YouTube authentication without user interaction."""
         # 1. Check if raw cookie content was passed in environment variable
-        if YOUTUBE_COOKIES_RAW:
+        raw_env = os.environ.get("YOUTUBE_COOKIES", "").strip() or YOUTUBE_COOKIES_RAW
+        if raw_env:
+            # Handle potential escaped newlines from environment variables
+            if "\\n" in raw_env and "\n" not in raw_env:
+                raw_env = raw_env.replace("\\n", "\n")
+            # If base64 encoded
+            if not raw_env.startswith("#") and len(raw_env) > 100:
+                try:
+                    import base64
+                    decoded = base64.b64decode(raw_env).decode("utf-8")
+                    if "youtube.com" in decoded or "Cookie" in decoded:
+                        raw_env = decoded
+                except Exception:
+                    pass
+
             cookie_dest = EPHEMERAL_TEMP_DIR / "server_yt_cookies.txt"
             try:
-                if not cookie_dest.exists() or cookie_dest.read_text(encoding="utf-8") != YOUTUBE_COOKIES_RAW:
-                    cookie_dest.write_text(YOUTUBE_COOKIES_RAW, encoding="utf-8")
+                if not cookie_dest.exists() or cookie_dest.read_text(encoding="utf-8") != raw_env:
+                    cookie_dest.write_text(raw_env, encoding="utf-8")
                 return str(cookie_dest)
             except Exception as e:
                 logger.warning(f"Não foi possível gravar cookie de ambiente: {e}")
 
         # 2. Check explicit path in environment variable
-        if YOUTUBE_COOKIES_FILE and Path(YOUTUBE_COOKIES_FILE).exists():
-            return YOUTUBE_COOKIES_FILE
+        custom_file = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip() or YOUTUBE_COOKIES_FILE
+        if custom_file and Path(custom_file).exists():
+            return custom_file
 
         # 3. Check Render default Secret Files location
         render_secret = Path("/etc/secrets/cookies.txt")
