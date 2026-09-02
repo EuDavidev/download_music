@@ -223,33 +223,44 @@ class DownloadService:
 
         client_tiers = [
             None,  # Default (visionos / multi-client automatic selection with JS solver)
-            ["tv_embedded"],
+            ["android_vr"],
             ["android_music"],
             ["mweb"],
+            ["tv_embedded"],
+            ["ios"],
             ["android"],
-            ["web"],
-            ["ios"]
+            ["web"]
         ]
 
         def _extract():
             last_ex = None
-            for clients in client_tiers:
-                ydl_opts = self._get_base_ytdlp_opts()
-                ydl_opts.update({
-                    "extract_flat": "in_playlist",
-                    "skip_download": True,
-                    "ignore_no_formats_error": True,
-                })
-                if clients:
-                    ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        if info:
-                            return info
-                except Exception as ex:
-                    last_ex = ex
-                    logger.debug(f"Tentativa de extração com clientes {clients or 'default'} falhou: {ex}. Tentando próximo...")
+            cookie_path = self._resolve_cookie_file()
+            # Tentar primeiro com a configuração padrão (com cookies se houver) e depois sem cookies se falhar
+            cookie_configs = [cookie_path] if not cookie_path else [cookie_path, None]
+
+            for c_path in cookie_configs:
+                for clients in client_tiers:
+                    ydl_opts = self._get_base_ytdlp_opts()
+                    if not c_path and "cookiefile" in ydl_opts:
+                        del ydl_opts["cookiefile"]
+                    elif c_path:
+                        ydl_opts["cookiefile"] = c_path
+
+                    ydl_opts.update({
+                        "extract_flat": "in_playlist",
+                        "skip_download": True,
+                        "ignore_no_formats_error": True,
+                    })
+                    if clients:
+                        ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(url, download=False)
+                            if info:
+                                return info
+                    except Exception as ex:
+                        last_ex = ex
+                        logger.debug(f"Tentativa de extração com clientes {clients or 'default'} (cookie={bool(c_path)}) falhou: {ex}. Tentando próximo...")
 
             # Fallback flat extraction if all strict format checks failed
             try:
@@ -596,44 +607,54 @@ class DownloadService:
                 ],
             })
 
-        # Fallback strategies: default (visionos / yt-dlp native with JS EJS solver) -> tv_embedded -> android_music -> mweb -> android -> web -> ios
+        # Fallback strategies: default -> android_vr -> android_music -> mweb -> tv_embedded -> ios -> android -> web
         client_strategies = [
             None,  # Native automatic multi-client resolution with JS challenges
-            ["tv_embedded"],
+            ["android_vr"],
             ["android_music"],
             ["mweb"],
+            ["tv_embedded"],
+            ["ios"],
             ["android"],
             ["web"],
-            ["ios"],
         ]
 
+        cookie_path = self._resolve_cookie_file()
+        cookie_configs = [cookie_path] if not cookie_path else [cookie_path, None]
+
         last_err = None
-        for clients in client_strategies:
-            if job.cancelled:
-                return None
-            try:
-                if clients:
-                    ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
-                elif "extractor_args" in ydl_opts:
-                    ydl_opts.pop("extractor_args")
+        for c_path in cookie_configs:
+            for clients in client_strategies:
+                if job.cancelled:
+                    return None
+                try:
+                    if not c_path and "cookiefile" in ydl_opts:
+                        del ydl_opts["cookiefile"]
+                    elif c_path:
+                        ydl_opts["cookiefile"] = c_path
 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.extract_info(url, download=True)
+                    if clients:
+                        ydl_opts["extractor_args"] = {"youtube": {"player_client": clients}}
+                    elif "extractor_args" in ydl_opts:
+                        ydl_opts.pop("extractor_args")
 
-                # Locate resulting file
-                candidates = list(output_dir.glob("*.*"))
-                if candidates:
-                    matching = [c for c in candidates if c.suffix.lstrip(".").lower() == fmt]
-                    if matching:
-                        matching.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                        return str(matching[0])
-                    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                    return str(candidates[0])
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.extract_info(url, download=True)
 
-            except Exception as e:
-                last_err = e
-                logger.warning(f"Tentativa com cliente {clients or 'default'} falhou: {e}. Tentando próximo cliente...")
-                time.sleep(0.5)
+                    # Locate resulting file
+                    candidates = list(output_dir.glob("*.*"))
+                    if candidates:
+                        matching = [c for c in candidates if c.suffix.lstrip(".").lower() == fmt]
+                        if matching:
+                            matching.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                            return str(matching[0])
+                        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        return str(candidates[0])
+
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"Tentativa com cliente {clients or 'default'} (cookie={bool(c_path)}) falhou: {e}. Tentando próximo cliente...")
+                    time.sleep(0.5)
 
         if last_err:
             raise last_err
@@ -662,10 +683,8 @@ class DownloadService:
         """Translates technical errors to user-friendly Portuguese."""
         if "Requested format is not available" in err_str:
             return "O formato de áudio para este vídeo não pôde ser extraído. Tente outro formato ou qualidade."
-        if "403" in err_str or "Forbidden" in err_str:
-            return "O YouTube bloqueou temporariamente esta conexão. Tentando rota alternativa..."
-        if "Sign in to confirm" in err_str or "bot" in err_str.lower():
-            return "O YouTube solicitou verificação antibot. O servidor está tentando rotas alternativas..."
+        if "Sign in to confirm" in err_str or "bot" in err_str.lower() or "403" in err_str or "Forbidden" in err_str:
+            return "O YouTube solicitou verificação antibot (IP de datacenter ou cookies expirados). Se estiver hospedado em nuvem, atualize o 'cookies.txt' ou configure um proxy."
         if "Private video" in err_str or "Privado" in err_str:
             return "Este vídeo é privado e não pode ser acessado."
         if "Video unavailable" in err_str or "Indisponível" in err_str:
