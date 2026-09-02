@@ -1,10 +1,11 @@
 @echo off
-title America Web - Cloudflare Tunnel
+title America Web - Ngrok Tunnel
 echo =======================================================
-echo   AMERICA WEB - CLOUDFLARE TUNNEL (ACESSO PUBLICO)
+echo   AMERICA WEB - NGROK TUNNEL (URL FIXA)
 echo =======================================================
 echo.
-echo Conectando ao Cloudflare... Aguarde a geracao do link HTTPS.
+echo Conectando ao Ngrok... Link: https://unpaved-counting-patio.ngrok-free.dev
 echo.
-cloudflared tunnel --url http://localhost:8000
+ngrok http --url https://unpaved-counting-patio.ngrok-free.dev 8000
 pause
+
