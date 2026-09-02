@@ -14,11 +14,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY . .
 
-# Expose Cloud Run default port
-EXPOSE 8080
+# Expose port
+EXPOSE 8000
 
 ENV NO_BROWSER=1
-ENV PORT=8080
+ENV PORT=8000
 
 # Start server
 CMD ["python", "run_web.py"]
