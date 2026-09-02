@@ -1,0 +1,299 @@
+/* ─────────────────────────────────────────────────────────────
+   AMÉRICA WEB — PORTAL DE RECEPÇÃO & LANDING PAGE (VERCEL)
+   Design System: Midnight Obsidian, Indigo Glow, Glassmorphism
+   Zero-scroll viewport layout
+───────────────────────────────────────────────────────────── */
+
+:root {
+  --bg-main: #0a0a14;
+  --bg-surface: #111122;
+  --bg-card: rgba(22, 22, 44, 0.85);
+  --bg-glass: rgba(19, 19, 38, 0.75);
+  
+  --border-color: rgba(99, 102, 241, 0.22);
+  --border-hover: rgba(99, 102, 241, 0.5);
+
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
+  --color-primary-glow: rgba(79, 70, 229, 0.45);
+
+  --color-accent: #22c55e;
+  --color-accent-glow: rgba(34, 197, 94, 0.35);
+
+  --color-america-red: #ef4444;
+  --color-america-blue: #3b82f6;
+
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 9999px;
+
+  --shadow-card: 0 20px 50px rgba(0, 0, 0, 0.5), 0 0 40px rgba(79, 70, 229, 0.15);
+  --shadow-btn: 0 10px 25px rgba(79, 70, 229, 0.4);
+
+  --font-main: 'Poppins', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-brand: 'Righteous', cursive, sans-serif;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  font-family: var(--font-main);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background-image: 
+    radial-gradient(circle at 15% 15%, rgba(79, 70, 229, 0.2) 0%, transparent 45%),
+    radial-gradient(circle at 85% 85%, rgba(239, 68, 68, 0.12) 0%, transparent 45%),
+    radial-gradient(circle at 50% 50%, rgba(59, 130, 246, 0.08) 0%, transparent 60%);
+  background-attachment: fixed;
+}
+
+/* Background Animated Glow Spheres */
+.bg-glow-1 {
+  position: absolute;
+  width: 350px;
+  height: 350px;
+  top: 10%;
+  left: 20%;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
+  filter: blur(40px);
+  pointer-events: none;
+  animation: floatOrb 10s ease-in-out infinite alternate;
+}
+
+.bg-glow-2 {
+  position: absolute;
+  width: 300px;
+  height: 300px;
+  bottom: 10%;
+  right: 20%;
+  background: radial-gradient(circle, rgba(236, 72, 153, 0.12) 0%, transparent 70%);
+  filter: blur(40px);
+  pointer-events: none;
+  animation: floatOrb 12s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes floatOrb {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(30px, -25px) scale(1.1); }
+}
+
+/* Portal Card Container */
+.portal-card {
+  position: relative;
+  z-index: 10;
+  width: 100%;
+  max-width: 480px;
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 2.25rem 2rem;
+  box-shadow: var(--shadow-card);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  transition: transform 0.3s ease, border-color 0.3s ease;
+}
+
+.portal-card:hover {
+  border-color: var(--border-hover);
+}
+
+/* Top Status Badge */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.85rem;
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: var(--radius-pill);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #4ade80;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  background-color: var(--color-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--color-accent);
+  animation: pulseDot 2s infinite;
+}
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* Brand Logo */
+.brand-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.logo-icon-box {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 10px 25px rgba(99, 102, 241, 0.4);
+  color: #ffffff;
+  font-size: 1.75rem;
+}
+
+.brand-title {
+  font-family: var(--font-brand);
+  font-size: 2.1rem;
+  letter-spacing: 1px;
+  background: linear-gradient(135deg, #ffffff 30%, #a5b4fc 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  line-height: 1.1;
+}
+
+.brand-subtitle {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  font-weight: 400;
+  max-width: 380px;
+  line-height: 1.45;
+}
+
+/* Feature Tags Grid */
+.features-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.feature-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.75rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.feature-pill i {
+  color: #818cf8;
+}
+
+/* Primary CTA Button */
+.btn-enter-app {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  border: none;
+  border-radius: var(--radius-md);
+  color: #ffffff;
+  font-family: var(--font-main);
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  box-shadow: var(--shadow-btn);
+  transition: all 0.25s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-enter-app::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  transition: left 0.6s ease;
+}
+
+.btn-enter-app:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 30px rgba(79, 70, 229, 0.55);
+  background: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
+}
+
+.btn-enter-app:hover::before {
+  left: 100%;
+}
+
+.btn-enter-app:active {
+  transform: translateY(0);
+}
+
+/* Footer / Direct Tip */
+.portal-footer {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.portal-footer i {
+  color: #f59e0b;
+}
+
+/* Responsive adjustment for small screens */
+@media (max-height: 600px) {
+  .portal-card {
+    padding: 1.25rem 1.5rem;
+    gap: 0.75rem;
+  }
+  .logo-icon-box {
+    width: 48px;
+    height: 48px;
+    font-size: 1.3rem;
+  }
+  .brand-title {
+    font-size: 1.6rem;
+  }
+  .btn-enter-app {
+    padding: 0.75rem 1rem;
+    font-size: 0.95rem;
+  }
+}
