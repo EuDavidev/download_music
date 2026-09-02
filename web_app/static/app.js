@@ -6,9 +6,22 @@
 (function () {
   'use strict';
 
+  // Injeta automaticamente o cabeçalho anti-aviso do Ngrok em todas as requisições fetch
+  const originalFetch = window.fetch;
+  window.fetch = function (url, options = {}) {
+    options.headers = options.headers || {};
+    if (options.headers instanceof Headers) {
+      options.headers.set('ngrok-skip-browser-warning', 'true');
+    } else {
+      options.headers['ngrok-skip-browser-warning'] = 'true';
+    }
+    return originalFetch(url, options);
+  };
+
   // State
   let currentFormat = 'mp3';
   let currentQuality = '320';
+
   let currentInfo = null;
   let activeJobs = new Map();
   let ws = null;
