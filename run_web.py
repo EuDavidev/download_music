@@ -7,8 +7,36 @@ import os
 import sys
 import socket
 import webbrowser
-import uvicorn
 from pathlib import Path
+
+# Garante que sys.path inclua o diretório raiz
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+os.chdir(BASE_DIR)
+
+# Garante encoding UTF-8 no console Windows
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+# Garante que sys.stdout e sys.stderr funcionem com pythonw / servico sem console
+if sys.stdout is None or sys.stderr is None:
+    server_log = BASE_DIR / "server.log"
+    try:
+        sys.stdout = open(server_log, "a", encoding="utf-8", buffering=1)
+        sys.stderr = sys.stdout
+    except Exception:
+        pass
+
+import uvicorn
 
 
 def get_lan_ip() -> str:
@@ -25,15 +53,16 @@ def get_lan_ip() -> str:
 
 def print_banner(lan_ip: str, port: int):
     print("\n" + "=" * 65)
-    print("  🎵  AMÉRICA WEB — CONVERSOR DE YOUTUBE PARA MP3  🎵")
+    print("  [AMERICA WEB] - CONVERSOR DE YOUTUBE PARA MP3")
     print("=" * 65)
-    print(f"  • Acesso no Computador:  http://localhost:{port}")
-    print(f"  • Acesso no Celular/LAN:  http://{lan_ip}:{port}")
+    print(f"  * Acesso no Computador:   http://localhost:{port}")
+    print(f"  * Acesso no Celular/LAN:  http://{lan_ip}:{port}")
     print("=" * 65)
     print("  Dica: Conecte o celular na mesma rede Wi-Fi para baixar")
-    print("  músicas direto no seu smartphone!\n")
+    print("  musicas direto no seu smartphone!\n")
     print("  Pressione CTRL+C para encerrar o servidor.")
     print("=" * 65 + "\n")
+
 
 
 def main():
