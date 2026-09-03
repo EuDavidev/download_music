@@ -3,9 +3,12 @@ América Web — API Controller
 FastAPI Router managing HTTP REST endpoints, audio streaming, and direct browser downloads.
 """
 
+import re
 import uuid
 import socket
 import logging
+import urllib.parse
+import unicodedata
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -186,11 +189,17 @@ async def download_file_direct(
     }
     media_type = mime_map.get(target_file.suffix.lower(), "application/octet-stream")
 
+    # Safe RFC 6266 / RFC 5987 Content-Disposition header
+    # Prevents UnicodeEncodeError ('latin-1') when titles have special Unicode chars like '｜' (\uff5c)
+    ascii_fallback = unicodedata.normalize('NFKD', filename).encode('ascii', 'ignore').decode('ascii')
+    ascii_fallback = re.sub(r'[\r\n"\\/;|]', '_', ascii_fallback).strip() or "download.mp3"
+    quoted_utf8 = urllib.parse.quote(filename, encoding='utf-8')
+    content_disposition = f'attachment; filename="{ascii_fallback}"; filename*=utf-8\'\'{quoted_utf8}'
+
     return FileResponse(
         path=str(target_file),
-        filename=filename,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        headers={"Content-Disposition": content_disposition}
     )
 
 
